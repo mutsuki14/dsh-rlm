@@ -154,6 +154,39 @@ await h.message("again")
   await provided.dispose();
 }
 
+// 5. unpaired UTF-16 surrogates in child output must not crash the kernel
+{
+  const dirty = "hello\uDCAC world 👍";
+  const agentBox = { current: { id: "p1", session: { id: "p1" } } };
+  const { provided } = ctxFor(agentBox, {
+    subagents: {
+      startContinuable: async () => ({ childId: "c-surr", messageId: "m" }),
+      listChildren: async () => [{ id: "c-surr", mode: "continuable", activity: "idle" }],
+      start: async () => {
+        throw new Error("start should not run");
+      },
+    },
+    sessions: {
+      get: () => ({ deriveMessages: () => [{ role: "assistant", text: dirty }] }),
+      append() {},
+    },
+  });
+  const r = await provided.run({
+    program: `h = await rlm("review", name="auth")
+got = await h.wait()
+print("got", got)
+print("ok-surrogate")
+`,
+    bindings: [],
+  });
+  const logs = (r.logs || []).join("\n");
+  if (r.error) fail(`surrogate crash: ${r.error.message}`);
+  else if (!logs.includes("ok-surrogate")) fail(`surrogate logs ${logs}`);
+  else if (logs.includes("\uDCAC")) fail(`surrogate leaked into logs ${JSON.stringify(logs)}`);
+  else console.log("ok surrogate sanitized");
+  await provided.dispose();
+}
+
 if (process.exitCode) {
   console.error("prod checks failed");
   process.exit(process.exitCode);

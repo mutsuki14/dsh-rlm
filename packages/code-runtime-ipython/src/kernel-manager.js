@@ -196,10 +196,10 @@ var KernelManager = class {
     if (msg.type === "host") {
       try {
         const result = this.host ? await this.host(String(msg.method), msg.params ?? {}) : null;
-        this.writeStdin(JSON.stringify({ type: "host_result", id: msg.id, result }) + "\n");
+        this.writeStdin(JSON.stringify({ type: "host_result", id: msg.id, result: sanitizeJson(result) }) + "\n");
       } catch (err) {
         this.writeStdin(
-          JSON.stringify({ type: "host_result", id: msg.id, error: String(err) }) + "\n"
+          JSON.stringify({ type: "host_result", id: msg.id, error: sanitizeText(String(err)) }) + "\n"
         );
       }
       return;
@@ -210,6 +210,20 @@ var KernelManager = class {
     pending.resolve(msg);
   }
 };
+function sanitizeText(s) {
+  if (typeof s !== "string") return s;
+  return Buffer.from(s, "utf8").toString("utf8");
+}
+function sanitizeJson(v) {
+  if (typeof v === "string") return sanitizeText(v);
+  if (Array.isArray(v)) return v.map(sanitizeJson);
+  if (v && typeof v === "object") {
+    const out = {};
+    for (const [k, val] of Object.entries(v)) out[k] = sanitizeJson(val);
+    return out;
+  }
+  return v;
+}
 function pythonRoot() {
   return join(dirname(fileURLToPath(import.meta.url)), "../python");
 }

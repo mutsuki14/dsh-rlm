@@ -32,21 +32,45 @@ from rlm_shim import snapshot as shim_snapshot
 NS: dict[str, Any] = {"__name__": "__main__"}
 _REAL_STDOUT = sys.stdout
 _HOST_LOCK = threading.Lock()
+_SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
+
+
+def _clean_str(s: str) -> str:
+    return s.translate(_SURROGATES)
+
+
+def _clean(value: Any) -> Any:
+    if isinstance(value, str):
+        return _clean_str(value)
+    if isinstance(value, list):
+        return [_clean(v) for v in value]
+    if isinstance(value, tuple):
+        return [_clean(v) for v in value]
+    if isinstance(value, dict):
+        return {
+            _clean_str(k) if isinstance(k, str) else k: _clean(v) for k, v in value.items()
+        }
+    return value
+
+
+def _json(value: Any) -> str:
+    return json.dumps(_clean(value), ensure_ascii=False)
 
 
 def _dump(value: Any) -> Any:
+    cleaned = _clean(value)
     try:
-        json.dumps(value)
-        return value
+        json.dumps(cleaned)
+        return cleaned
     except TypeError:
-        return repr(value)
+        return _clean_str(repr(value))
 
 
 def _host_request(method: str, params: dict[str, Any]) -> Any:
     req_id = f"h{id(params)}-{method}"
     with _HOST_LOCK:
         _REAL_STDOUT.write(
-            json.dumps({"type": "host", "id": req_id, "method": method, "params": params}) + "\n"
+            _json({"type": "host", "id": req_id, "method": method, "params": params}) + "\n"
         )
         _REAL_STDOUT.flush()
         line = sys.stdin.readline()
@@ -54,8 +78,8 @@ def _host_request(method: str, params: dict[str, Any]) -> Any:
             raise RuntimeError("host closed")
         msg = json.loads(line)
         if msg.get("error"):
-            raise RuntimeError(msg["error"])
-        return msg.get("result")
+            raise RuntimeError(_clean_str(str(msg["error"])))
+        return _clean(msg.get("result"))
 
 
 shim_host.set_transport(_host_request)
@@ -164,7 +188,7 @@ def main() -> None:
             continue
         msg = json.loads(line)
         out = handle(msg)
-        _REAL_STDOUT.write(json.dumps(out) + "\n")
+        _REAL_STDOUT.write(_json(out) + "\n")
         _REAL_STDOUT.flush()
         if msg.get("method") == "shutdown":
             break

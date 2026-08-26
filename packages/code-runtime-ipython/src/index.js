@@ -483,6 +483,7 @@ class IPythonCodeRuntime {
     else if (Array.isArray(content)) text = outputValueText(content);
     else if (content != null) text = String(content);
     if (typeof text === "string" && /^started subagent/i.test(text.trim())) text = null;
+    if (typeof text === "string") text = sanitizeText(text);
     return { text, count: assistants.length };
   }
 
@@ -733,6 +734,11 @@ function isRetryableContinuable(err) {
   );
 }
 
+function sanitizeText(s) {
+  if (typeof s !== "string") return s;
+  return Buffer.from(s, "utf8").toString("utf8");
+}
+
 function asBlocks(text) {
   if (Array.isArray(text)) return text;
   return [{ type: "text", text: String(text ?? "") }];
@@ -764,15 +770,17 @@ function foldSubagentOutput(settled) {
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) {
       return null;
     }
-    return settled;
+    return sanitizeText(settled);
   }
-  if (typeof settled !== "object") return String(settled);
-  if (settled.structured != null) return settled.structured;
+  if (typeof settled !== "object") return sanitizeText(String(settled));
+  if (settled.structured != null) {
+    return typeof settled.structured === "string" ? sanitizeText(settled.structured) : settled.structured;
+  }
   const output = settled.output ?? settled.content ?? settled;
-  if (typeof output === "string") return output;
+  if (typeof output === "string") return sanitizeText(output);
   if (Array.isArray(output)) return outputValueText(output);
   if (output && typeof output === "object" && typeof output.text === "string") {
-    return output.text;
+    return sanitizeText(output.text);
   }
   return null;
 }
@@ -801,7 +809,7 @@ function outputValueText(values) {
       }
     }
   }
-  return texts.join("") || null;
+  return texts.length ? sanitizeText(texts.join("")) : null;
 }
 
 function extractUserText(ev) {

@@ -236,10 +236,12 @@ export class KernelManager {
         const result = this.host
           ? await this.host(String(msg.method), (msg.params as Record<string, unknown>) ?? {})
           : null;
-        this.proc?.stdin?.write(JSON.stringify({ type: "host_result", id: msg.id, result }) + "\n");
+        this.proc?.stdin?.write(
+          JSON.stringify({ type: "host_result", id: msg.id, result: sanitizeJson(result) }) + "\n",
+        );
       } catch (err) {
         this.proc?.stdin?.write(
-          JSON.stringify({ type: "host_result", id: msg.id, error: String(err) }) + "\n",
+          JSON.stringify({ type: "host_result", id: msg.id, error: sanitizeText(String(err)) }) + "\n",
         );
       }
       return;
@@ -249,6 +251,21 @@ export class KernelManager {
     this.pending.delete(String(msg.id));
     pending.resolve(msg);
   }
+}
+
+function sanitizeText(s: string): string {
+  return Buffer.from(s, "utf8").toString("utf8");
+}
+
+function sanitizeJson(v: unknown): unknown {
+  if (typeof v === "string") return sanitizeText(v);
+  if (Array.isArray(v)) return v.map(sanitizeJson);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = sanitizeJson(val);
+    return out;
+  }
+  return v;
 }
 
 function pythonRoot() {
