@@ -88,25 +88,16 @@ class IPythonCodeRuntime {
         const run = this.runs.get(id);
         if (run?.result) {
           const settled = await run.result;
-          const folded = foldSubagentOutput(settled);
-          if (folded != null && folded !== "") {
-            return { result: folded, status: "done" };
+          let folded = foldSubagentOutput(settled);
+          if ((folded == null || folded === "") && !(settled?.stopReason && settled.stopReason !== "running")) {
+            folded = await this.waitContinuable(id);
           }
-          if (settled?.stopReason && settled.stopReason !== "running") {
-            return {
-              result: folded,
-              status: settled.stopReason,
-              diagnostic: settled.diagnostic ?? null,
-            };
-          }
-          const polled = await this.waitContinuable(id);
-          if (polled != null && polled !== "") {
-            return { result: polled, status: "done" };
-          }
+          await disposeRun(run);
+          this.runs.delete(id);
           return {
-            result: folded,
+            result: folded ?? null,
             status: settled?.stopReason ?? "done",
-            diagnostic: settled.diagnostic ?? null,
+            diagnostic: settled?.diagnostic ?? null,
           };
         }
         const result = await this.waitContinuable(id);
@@ -223,6 +214,13 @@ class IPythonCodeRuntime {
   }
 }
 
+function disposeRun(run) {
+  if (run && typeof run.dispose === "function") {
+    return Promise.resolve(run.dispose()).catch(() => undefined);
+  }
+  return Promise.resolve();
+}
+
 function childIdFrom(out) {
   if (out == null) return undefined;
   if (typeof out === "string") {
@@ -256,16 +254,19 @@ function outputValueText(values) {
       continue;
     }
     if (!value || typeof value !== "object") continue;
-    if (value.type === "text" && typeof value.text === "string") {
+    if (value.type && value.type !== "text") continue;
+    if (typeof value.text === "string") {
       texts.push(value.text);
       continue;
     }
-    const content = value.content ?? value.text ?? value.message;
+    const content = value.content ?? value.message;
     if (typeof content === "string") texts.push(content);
     else if (Array.isArray(content)) {
       for (const b of content) {
         if (typeof b === "string") texts.push(b);
-        else if (b && typeof b.text === "string") texts.push(b.text);
+        else if (b && (!b.type || b.type === "text") && typeof b.text === "string") {
+          texts.push(b.text);
+        }
       }
     }
   }
