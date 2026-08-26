@@ -1,5 +1,7 @@
 # @seamlabs/dsh-rlm
 
+English | [中文](README.zh-CN.md)
+
 Persistent **Recursive Language Model** runtime for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
 First release: **v0.2.0**.

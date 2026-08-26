@@ -1,5 +1,7 @@
 # Mount into DeepSeek Harness
 
+English | [中文](INSTALL.zh-CN.md)
+
 `package.json` declares `dsh.bundle.patch`. `dsh plugin add` stacks that file as a **top-level YAML array of loader patch entries** — not a `cordis.yml` object. Plugin entries are **JavaScript** (Node will not strip types under `node_modules`).
 
 ```sh
