@@ -11,6 +11,7 @@ let provided;
 const events = [];
 let assistants = [{ role: "assistant", text: "ROUND1" }];
 let followups = 0;
+let spawnedPrompt = "";
 
 const ctx = {
   provide(name, value) {
@@ -38,6 +39,7 @@ const ctx = {
       if (!spec?.provider) throw new Error("missing provider");
       if (!spec?.label) throw new Error("missing label");
       if (!Array.isArray(spec.request?.prompt)) throw new Error("prompt must be ContentBlock[]");
+      spawnedPrompt = spec.request.prompt.map((b) => (b && b.text) || "").join("");
       if (!spec.signal) throw new Error("missing signal");
       return {
         childId: "c3fb07d4-eafa-4f9b-ac1b-fd6c11c3af86",
@@ -104,6 +106,8 @@ const logs = (r1.logs || []).join("\n");
 console.log("--- followup logs ---");
 console.log(logs);
 if (r1.error) fail(r1.error.message);
+if (!spawnedPrompt.includes("Stay inside")) fail(`child prompt missing cwd bound: ${spawnedPrompt}`);
+if (!spawnedPrompt.includes("first look")) fail(`child prompt dropped user text: ${spawnedPrompt}`);
 if (!logs.includes("got ROUND1")) fail(`expected ROUND1, logs=${logs}`);
 if (!logs.includes("got_again ROUND1")) fail(`idempotent wait ${logs}`);
 if (!logs.includes("got2 ROUND2:only error handling")) fail(`expected ROUND2, logs=${logs}`);

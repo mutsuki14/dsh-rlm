@@ -3,6 +3,11 @@
 # the targeted row's whole `config`. `name` on an id-targeted patch is
 # a match guard, not a rename — so we disable the web-app worker-thread
 # row and insert our own.
+#
+# Do NOT set tools.mode=code globally. That collapses every subagent to
+# run_code-only, so a child asked to "Review auth/" walks the disk for
+# 70 cells and never goes idle. Code presentation is applied per parent
+# agent in rlm-persona (tools.presentAs on agent.ctx).
 
 - id: code-runtime
   disabled: true
@@ -17,11 +22,6 @@
     - id: rlm-persona
       name: '@seamlabs/dsh-rlm/persona'
       config:
-        presentAs: code
         maxDepth: 2
     - id: rlm-snapshot
       name: '@seamlabs/dsh-rlm/snapshot'
-
-- id: tools
-  config:
-    mode: code

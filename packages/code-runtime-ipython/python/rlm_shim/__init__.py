@@ -10,7 +10,7 @@ from typing import Any
 
 from .host import host_request, host_request_sync
 
-RLM_VERSION = "0.4.5"
+RLM_VERSION = "0.4.6"
 _SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
 
 
@@ -45,6 +45,15 @@ class RLMSpawnHandle:
     status: str = "running"
     result: Any = None
     mode: str = "continuable"
+
+    async def peek(self) -> Any:
+        payload = await host_request("rlm.peek", {"rlm_child_id": self.rlm_child_id})
+        if isinstance(payload, dict):
+            self.status = str(payload.get("status") or self.status)
+            if payload.get("result") is not None:
+                self.result = sanitize(payload.get("result"))
+            return payload
+        return sanitize(payload)
 
     async def wait(self) -> Any:
         payload = await host_request("rlm.wait", {"rlm_child_id": self.rlm_child_id})

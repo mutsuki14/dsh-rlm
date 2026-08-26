@@ -4,7 +4,7 @@
 
 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的持久化 **递归语言模型（RLM）** 运行时。
 
-当前版本：**v0.4.5**（wait 等 child idle，超时 15 分钟；surrogate 安全）。
+当前版本：**v0.4.6**（Code Mode 只作用于父代理；wait 等 child idle）。
 
 它把默认「每次 `run_code` 新开 worker 线程」换成 **按会话常驻的 Python kernel**，暴露**非阻塞** `await rlm()`（可并行 fan-out 再 `wait()`），用 `handle.message()` 对**同一个 child** 再推一轮，注入 `context`/haystack，并把技能写成 kebab-case 包（`SKILL.md` + `__init__.py`）。
 
@@ -18,7 +18,7 @@ dsh plugin --profile web update github:mutsuki14/seam-rlm
 
 需要 Node 22+、Python 3（Windows 会依次找 `py -3` / `python` / `python3`，也可设 `DSH_RLM_PYTHON`）。装完请 **重启 profile**。
 
-bundle 补丁 [`cordis.patch.yml`](cordis.patch.yml) 必须是 **顶层 YAML 数组**：禁用原装 `code-runtime`、插入 `rlm-*` 行、设置 `tools.mode: code`。细节见 [INSTALL.md](INSTALL.md) / [INSTALL.zh-CN.md](INSTALL.zh-CN.md)。
+bundle 补丁 [`cordis.patch.yml`](cordis.patch.yml) 必须是 **顶层 YAML 数组**：禁用原装 `code-runtime`、插入 `rlm-*` 行。**不要**全局设置 `tools.mode: code`（会把子代理也收成只能 `run_code`）。细节见 [INSTALL.md](INSTALL.md) / [INSTALL.zh-CN.md](INSTALL.zh-CN.md)。
 
 ## 已验证
 
@@ -53,7 +53,7 @@ Windows 技能目录：`%USERPROFILE%\.dsh\rlm-skills\`，同时写一份到 `%U
 
 - 优先 `ctx.subagents.startContinuable`，其次 `tools.subagent(backgroundMode=continuable)`。one-shot `start()` 的 child **不能**续聊。
 - `followup` 只确认投递，正文仍靠 `wait()`。只允许 depth-1 直系 child。
-- 子代理共用 profile 的 `tools.mode: code`。
+- 子代理用原生 read/grep/bash；只有父协调器是 Code Mode。
 - `turn/end` snapshot 是尽力而为，**重启 harness 后不会还原 kernel**（技能文件会保留）。
 - kernel 本身不是沙箱，权限走 DSH。
 

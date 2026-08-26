@@ -4,7 +4,7 @@ English | [中文](README.zh-CN.md)
 
 Persistent **Recursive Language Model** runtime for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
-Current release line: **v0.4.5** (wait() uses agent.whenIdle; 15 min timeout).
+Current release line: **v0.4.6** (parent-only Code Mode; wait() uses agent.whenIdle).
 
 It replaces the per-turn worker-thread `codeRuntime` with a **long-lived Python kernel**, exposes non-blocking `await rlm()` (parallel fan-out + `wait()`), follows up the **same child** with `handle.message()`, injects `context` from haystack, and stores skills as kebab-case packages (`SKILL.md` + `__init__.py`).
 
@@ -18,7 +18,7 @@ dsh plugin --profile web update github:mutsuki14/seam-rlm
 
 Requires Node 22+, Python 3 (`py -3` / `python` / `python3`, or `DSH_RLM_PYTHON`). Restart the profile after install.
 
-The bundle patch (`cordis.patch.yml`) is a **top-level YAML array**: disables stock `code-runtime`, inserts `rlm-*` rows, sets `tools.mode: code`.
+The bundle patch (`cordis.patch.yml`) is a **top-level YAML array**: disables stock `code-runtime`, inserts `rlm-*` rows. Code Mode is **parent-only** (`tools.presentAs("code")` on the coordinator). Subagents keep native file tools.
 
 ## What works (live-tested on DSH 0.1.1-rc.2)
 
@@ -52,7 +52,7 @@ print(double(21))              # 42
 
 - Spawn prefers `ctx.subagents.startContinuable`, then Code Mode `tools.subagent(backgroundMode=continuable)`. A one-shot `start()` child **cannot** be followed up.
 - `followup` confirms delivery only; the body still comes from `wait()`. Depth-1 children only.
-- Child agents share the profile’s `tools.mode: code`.
+- Child agents keep native tools (read/grep/bash). Only the parent coordinator is Code Mode.
 - Snapshot on `turn/end` is best-effort and does **not** restore a kernel after harness restart (skills do).
 - Haystack is filled from `ctx["rlm.haystack"]`, `set_haystack` / `request.haystack`, or turn-start hooks.
 - Kernel is not a sandbox; rely on DSH permission / sandbox policy.

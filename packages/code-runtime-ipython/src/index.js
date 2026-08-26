@@ -153,6 +153,15 @@ class IPythonCodeRuntime {
   async hostMethods(method, params) {
       if (method === "rlm.run") return this.spawnChild(params);
       if (method === "rlm.wait") return this.waitChild(String(params.rlm_child_id));
+      if (method === "rlm.peek") {
+        const snap = this.readChildSnapshot(String(params.rlm_child_id));
+        const agent = this.childAgent(String(params.rlm_child_id));
+        return {
+          result: snap.text,
+          count: snap.count,
+          status: agent?.status ?? this.children.get(String(params.rlm_child_id))?.status ?? "unknown",
+        };
+      }
       if (method === "rlm.followup") {
         return this.followupChild(String(params.rlm_child_id), String(params.message ?? params.text ?? ""));
       }
@@ -198,8 +207,9 @@ class IPythonCodeRuntime {
     if (remaining <= 0) {
       throw new Error(`rlm(): max recursion depth (${this.maxDepth})`);
     }
-    const childPrompt = String(params.prompt ?? "").trim();
-    if (!childPrompt) throw new Error("rlm(): empty prompt");
+    const userPrompt = String(params.prompt ?? "").trim();
+    if (!userPrompt) throw new Error("rlm(): empty prompt");
+    const childPrompt = composeChildPrompt(userPrompt, parent);
     const label = params.name ?? "rlm";
     this.emit("rlm/spawn", { name: label, depth: remaining });
 
@@ -792,6 +802,18 @@ function isRetryableContinuable(err) {
 function sanitizeText(s) {
   if (typeof s !== "string") return s;
   return Buffer.from(s, "utf8").toString("utf8");
+}
+
+function composeChildPrompt(user, parent) {
+  const header = parent?.session?.header ?? {};
+  const cwd = header.cwd || parent?.session?.cwd || parent?.cwd || process.cwd();
+  return [
+    `You are a delegated subagent. Stay inside ${cwd} unless the task names another path.`,
+    "Use native file tools (read, grep, glob, bash). Finish with a written summary and stop.",
+    "Do not scan the whole disk, home directory, or prior DSH session logs.",
+    "",
+    user,
+  ].join("\n");
 }
 
 function asBlocks(text) {

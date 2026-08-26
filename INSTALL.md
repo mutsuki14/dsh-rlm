@@ -18,9 +18,9 @@ Then restart the profile. The layer:
 
 1. disables the stock `code-runtime` worker-thread row (id-targeted `name` cannot rename a row)
 2. inserts `rlm-runtime` / `rlm-bindings` / `rlm-persona` / `rlm-snapshot`
-3. restates `tools.mode: code` (a patch replaces the whole `config`)
+3. does **not** set `tools.mode: code` globally — that would collapse subagents to `run_code` only. The coordinator calls `tools.presentAs("code")` on `agent.ctx`.
 
-A later home-level `cordis.patch.yml` that writes `tools` again will overwrite this. Put this bundle last, or restate `mode: code` in the home layer.
+Do not restate `tools.mode: code` in a later home-level `cordis.patch.yml`.
 
 ```sh
 node test-repl.mjs

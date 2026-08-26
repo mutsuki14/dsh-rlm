@@ -18,9 +18,9 @@ dsh plugin --profile web update github:mutsuki14/seam-rlm
 
 1. 禁用原装 `code-runtime`（worker-thread）。对已有 `id` 打补丁时，`name` 只是匹配守卫，不能拿来改名。
 2. 插入 `rlm-runtime` / `rlm-bindings` / `rlm-persona` / `rlm-snapshot`
-3. 重写 `tools.mode: code`（补丁会替换该行的整个 `config`）
+3. **不要**全局写 `tools.mode: code`（子代理会被收成只能 `run_code`，审代码会空转超时）。父协调器在 `agent.ctx` 上调用 `tools.presentAs("code")`。
 
-之后若家目录的 `cordis.patch.yml` 再写一次 `tools`，会覆盖这里的 `mode`。把本 bundle 放最后，或在家目录层再写一遍 `mode: code`。
+家目录的 `cordis.patch.yml` 也别再写一遍 `tools.mode: code`。
 
 ```sh
 node test-repl.mjs
