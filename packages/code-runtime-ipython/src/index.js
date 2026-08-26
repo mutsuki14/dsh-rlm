@@ -9,6 +9,7 @@ class IPythonCodeRuntime {
   kernels = new Map();
   skills = new Map();
   runs = new Map();
+  aborts = new Map();
   lastParent = null;
   lastBindings = [];
   lastSignal = undefined;
@@ -47,14 +48,16 @@ class IPythonCodeRuntime {
           );
         }
         try {
+          const ac = new AbortController();
           const run = await this.ctx.subagents.start("spawn", {
             label: params.name ?? "rlm",
             prompt: [{ type: "text", text: String(params.prompt ?? "") }],
             parent,
-            signal: this.lastSignal ?? new AbortController().signal,
+            signal: ac.signal,
             maxDepth: 2,
           });
           this.runs.set(String(run.id), run);
+          this.aborts.set(String(run.id), ac);
           return {
             rlm_child_id: run.id,
             name: params.name ?? run.id,
@@ -94,6 +97,9 @@ class IPythonCodeRuntime {
           }
           await disposeRun(run);
           this.runs.delete(id);
+          const ac = this.aborts.get(id);
+          this.aborts.delete(id);
+          try { ac?.abort?.("rlm.wait settled"); } catch { /* ignore */ }
           return {
             result: folded ?? null,
             status: settled?.stopReason ?? "done",
@@ -209,6 +215,10 @@ class IPythonCodeRuntime {
   }
 
   async dispose() {
+    for (const ac of this.aborts.values()) {
+      try { ac.abort("runtime dispose"); } catch { /* ignore */ }
+    }
+    this.aborts.clear();
     await Promise.all([...this.kernels.values()].map((k) => k.shutdown()));
     this.kernels.clear();
   }
