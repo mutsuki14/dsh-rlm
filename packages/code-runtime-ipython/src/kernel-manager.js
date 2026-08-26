@@ -120,6 +120,10 @@ var KernelManager = class {
             new Error(`kernel exited ${code}${tail ? `: ${tail.slice(0, 500)}` : ""}`)
           );
         });
+        proc.unref();
+        proc.stdin?.unref?.();
+        proc.stdout?.unref?.();
+        proc.stderr?.unref?.();
         resolve();
       });
     });
