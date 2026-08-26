@@ -1,0 +1,14 @@
+$include:
+  - '@deepseek-ai/dsh-base'
+plugins:
+  - name: '@seamlabs/dsh-rlm/runtime'
+    id: code-runtime
+  - name: '@seamlabs/dsh-rlm/bindings'
+  - name: '@seamlabs/dsh-rlm/persona'
+    config:
+      presentAs: code
+      maxDepth: 2
+  - name: '@seamlabs/dsh-rlm/snapshot'
+config:
+  tools:
+    mode: code
