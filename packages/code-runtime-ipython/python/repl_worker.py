@@ -27,34 +27,24 @@ from rlm_shim import host as shim_host
 from rlm_shim import inject as shim_inject
 from rlm_shim import inspect as shim_inspect
 from rlm_shim import install as shim_install
+from rlm_shim import sanitize as _clean
 from rlm_shim import snapshot as shim_snapshot
 
 NS: dict[str, Any] = {"__name__": "__main__"}
 _REAL_STDOUT = sys.stdout
 _HOST_LOCK = threading.Lock()
-_SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
 
 
 def _clean_str(s: str) -> str:
-    return s.translate(_SURROGATES)
-
-
-def _clean(value: Any) -> Any:
-    if isinstance(value, str):
-        return _clean_str(value)
-    if isinstance(value, list):
-        return [_clean(v) for v in value]
-    if isinstance(value, tuple):
-        return [_clean(v) for v in value]
-    if isinstance(value, dict):
-        return {
-            _clean_str(k) if isinstance(k, str) else k: _clean(v) for k, v in value.items()
-        }
-    return value
+    return _clean(s) if isinstance(s, str) else s
 
 
 def _json(value: Any) -> str:
-    return json.dumps(_clean(value), ensure_ascii=False)
+    cleaned = _clean(value)
+    try:
+        return json.dumps(cleaned, ensure_ascii=False)
+    except (UnicodeEncodeError, ValueError, TypeError):
+        return json.dumps(cleaned, ensure_ascii=True, default=lambda o: str(type(o).__name__))
 
 
 def _dump(value: Any) -> Any:
@@ -137,8 +127,8 @@ def _run_cell(src: str) -> tuple[Any, list[str]]:
         elif not isinstance(last, ast.Expr):
             # last already included in body
             pass
-    logs = buf.getvalue().splitlines()
-    return value, logs
+    logs = [_clean_str(line) for line in buf.getvalue().splitlines()]
+    return _clean(value), logs
 
 
 def handle(msg: dict[str, Any]) -> dict[str, Any]:

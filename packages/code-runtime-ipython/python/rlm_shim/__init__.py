@@ -10,6 +10,24 @@ from typing import Any
 
 from .host import host_request, host_request_sync
 
+RLM_VERSION = "0.4.3"
+_SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
+
+
+def sanitize(value: Any) -> Any:
+    """Replace unpaired UTF-16 surrogates. utf-8 encode(errors='replace') still throws on them."""
+    if isinstance(value, str):
+        return value.translate(_SURROGATES)
+    if isinstance(value, list):
+        return [sanitize(v) for v in value]
+    if isinstance(value, tuple):
+        return [sanitize(v) for v in value]
+    if isinstance(value, dict):
+        return {
+            sanitize(k) if isinstance(k, str) else k: sanitize(v) for k, v in value.items()
+        }
+    return value
+
 
 def _from_payload(cls: type, payload: Any) -> Any:
     if not isinstance(payload, dict):
@@ -32,10 +50,10 @@ class RLMSpawnHandle:
         payload = await host_request("rlm.wait", {"rlm_child_id": self.rlm_child_id})
         if isinstance(payload, dict):
             self.status = str(payload.get("status") or "done")
-            self.result = payload.get("result")
+            self.result = sanitize(payload.get("result"))
         else:
             self.status = "done"
-            self.result = payload
+            self.result = sanitize(payload)
         return self.result
 
     async def message(self, text: str) -> "RLMSpawnHandle":
@@ -219,6 +237,14 @@ def install(ns: dict[str, Any] | None = None) -> None:
     target["load_skill"] = load_skill
     target["list_skills"] = list_skills
     target["chunk"] = chunk
+    target["sanitize"] = sanitize
+    target["__rlm_version__"] = RLM_VERSION
+    _builtin_print = target.get("print", print)
+
+    def _print(*args: Any, **kw: Any) -> None:
+        _builtin_print(*tuple(sanitize(a) if isinstance(a, str) else a for a in args), **kw)
+
+    target["print"] = _print
     target.setdefault("tools", _ToolsProxy("tools", ["bash", "read", "write"]))
     # Seed empty context; host injects haystack via injectNamespace / rlm.set_haystack.
     # Do NOT call load_haystack() here — install runs at kernel boot before the host loop.
@@ -238,6 +264,8 @@ def bind(spec_json: Any, ns: dict[str, Any] | None = None) -> None:
         "load_skill",
         "list_skills",
         "chunk",
+        "sanitize",
+        "print",
     }
     for item in spec:
         global_name = item.get("global")
@@ -275,6 +303,8 @@ _SKIP = {
     "load_skill",
     "list_skills",
     "chunk",
+    "sanitize",
+    "print",
     "tools",
 }
 
