@@ -10,7 +10,7 @@ from typing import Any
 
 from .host import host_request, host_request_sync
 
-RLM_VERSION = "0.4.7"
+RLM_VERSION = "0.4.8"
 _SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
 
 
@@ -55,8 +55,14 @@ class RLMSpawnHandle:
             return payload
         return sanitize(payload)
 
-    async def wait(self) -> Any:
-        payload = await host_request("rlm.wait", {"rlm_child_id": self.rlm_child_id})
+    async def wait(self, timeout: float | None = None) -> Any:
+        params: dict[str, Any] = {"rlm_child_id": self.rlm_child_id}
+        if timeout is not None:
+            ms = float(timeout)
+            if ms <= 10_000:
+                ms *= 1000
+            params["timeout_ms"] = int(ms)
+        payload = await host_request("rlm.wait", params)
         if isinstance(payload, dict):
             self.status = str(payload.get("status") or "done")
             self.result = sanitize(payload.get("result"))
@@ -104,6 +110,7 @@ class _Rlm:
     list_subagents = staticmethod(list_subagents)
     delete_subagent = staticmethod(delete_subagent)
     host_request = staticmethod(host_request)
+    RLMSpawnHandle = RLMSpawnHandle
 
     async def __call__(self, prompt: str, name: str | None = None, **kw: Any):
         return await run(prompt, name=name, **kw)

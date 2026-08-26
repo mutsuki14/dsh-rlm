@@ -152,14 +152,18 @@ class IPythonCodeRuntime {
 
   async hostMethods(method, params) {
       if (method === "rlm.run") return this.spawnChild(params);
-      if (method === "rlm.wait") return this.waitChild(String(params.rlm_child_id));
+      if (method === "rlm.wait") {
+        return this.waitChild(String(params.rlm_child_id), params.timeout_ms);
+      }
       if (method === "rlm.peek") {
-        const snap = this.readChildSnapshot(String(params.rlm_child_id));
-        const agent = this.childAgent(String(params.rlm_child_id));
+        const id = String(params.rlm_child_id);
+        const snap = this.readChildSnapshot(id);
+        const meta = this.children.get(id);
+        const agent = this.childAgent(id);
         return {
-          result: snap.text,
-          count: snap.count,
-          status: agent?.status ?? this.children.get(String(params.rlm_child_id))?.status ?? "unknown",
+          result: snap.text ?? meta?.lastText ?? null,
+          count: snap.count || (meta?.lastText ? 1 : 0),
+          status: agent?.status ?? meta?.status ?? "unknown",
         };
       }
       if (method === "rlm.followup") {
@@ -253,6 +257,7 @@ class IPythonCodeRuntime {
             sessionDir: out.sessionDir ?? out.session_dir ?? "",
             model: out.model ?? "",
           });
+          this.bindChildWatch(id, parent);
           return {
             rlm_child_id: id,
             name: params.name ?? id,
@@ -286,6 +291,7 @@ class IPythonCodeRuntime {
         mode: "continuable",
         depth: remaining - 1,
       });
+      this.bindChildWatch(id, parent);
       return {
         rlm_child_id: id,
         name: params.name ?? id,
@@ -327,20 +333,95 @@ class IPythonCodeRuntime {
   trackChild(id, extra) {
     const key = String(id);
     this.depthBySession.set(key, extra.depth);
+    const existing = this.children.get(key);
+    let settleResolve = existing?.settleResolve;
+    const settlePromise =
+      existing?.settlePromise ||
+      new Promise((resolve) => {
+        settleResolve = resolve;
+      });
     this.children.set(key, {
       id: key,
-      name: extra.name ?? key,
+      name: extra.name ?? existing?.name ?? key,
       mode: extra.mode ?? "continuable",
-      status: "running",
-      lastText: null,
-      assistantCount: 0,
+      status: extra.status ?? existing?.status ?? "running",
+      lastText: extra.lastText ?? existing?.lastText ?? null,
+      assistantCount: existing?.assistantCount ?? 0,
       run: extra.run,
       resultPromise: extra.resultPromise,
       consumed: false,
       awaitingFollowup: false,
-      sessionDir: extra.sessionDir ?? "",
-      model: extra.model ?? "",
+      settled: existing?.settled ?? false,
+      settlePromise,
+      settleResolve,
+      sessionDir: extra.sessionDir ?? existing?.sessionDir ?? "",
+      model: extra.model ?? existing?.model ?? "",
     });
+  }
+
+  markSettled(id, text, reason) {
+    const key = String(id);
+    const meta = this.children.get(key);
+    if (!meta) return;
+    const folded = text ? sanitizeText(String(text)) : meta.lastText;
+    if (folded) meta.lastText = folded;
+    if (meta.awaitingFollowup && !folded) return;
+    meta.status = reason === "error" ? "error" : "done";
+    meta.settled = true;
+    meta.awaitingFollowup = false;
+    try {
+      meta.settleResolve?.(meta.lastText ?? "");
+    } catch {
+      /* */
+    }
+  }
+
+  onChildEnded(info) {
+    const id = String(info?.id ?? info?.childId ?? "");
+    if (!id) return;
+    const text = foldBlocks(info?.lastAssistantMessage ?? info?.output);
+    if (!this.children.has(id)) {
+      this.trackChild(id, { name: info?.label ?? id, mode: "continuable" });
+    }
+    this.markSettled(id, text, info?.stopReason);
+  }
+
+  bindChildWatch(id, parent) {
+    const meta = this.children.get(String(id));
+    if (!meta) return;
+    if (!meta.settlePromise) {
+      meta.settlePromise = new Promise((resolve) => {
+        meta.settleResolve = resolve;
+      });
+    }
+    const scoped = parent?.ctx || this.ctx;
+    if (!meta.watchedEnd) {
+      meta.watchedEnd = true;
+      const handle = (info) => this.onChildEnded(info);
+      try {
+        scoped?.on?.("subagent/end", handle);
+      } catch {
+        /* */
+      }
+      try {
+        if (scoped !== this.ctx) this.ctx.on?.("subagent/end", handle);
+      } catch {
+        /* */
+      }
+    }
+    const attachIdle = () => {
+      const agent = this.childAgent(id);
+      if (!agent || typeof agent.whenIdle !== "function" || meta.watchedIdle) return;
+      meta.watchedIdle = true;
+      Promise.resolve(agent.whenIdle())
+        .then(() => {
+          const snap = this.readChildSnapshot(id);
+          this.markSettled(id, snap.text || meta.lastText, "completed");
+        })
+        .catch(() => {});
+    };
+    attachIdle();
+    setTimeout(attachIdle, 25);
   }
 
   bumpFollowup(id) {
@@ -349,6 +430,11 @@ class IPythonCodeRuntime {
       meta.status = "running";
       meta.consumed = true;
       meta.awaitingFollowup = true;
+      meta.settled = false;
+      meta.watchedIdle = false;
+      meta.settlePromise = new Promise((resolve) => {
+        meta.settleResolve = resolve;
+      });
     }
   }
 
@@ -378,6 +464,7 @@ class IPythonCodeRuntime {
       );
     }
     this.bumpFollowup(id);
+    this.bindChildWatch(id, parent);
     this.emit("rlm/followup", { id, messageId });
     return { messageId, status: "running" };
   }
@@ -402,11 +489,13 @@ class IPythonCodeRuntime {
     return true;
   }
 
-  async waitChild(id) {
+  async waitChild(id, timeoutMs) {
+    const budget = Number.isFinite(Number(timeoutMs)) ? Math.max(1000, Number(timeoutMs)) : this.waitTimeoutMs;
     const meta = this.children.get(id);
     if (meta && meta.status === "done" && meta.lastText != null && !meta.awaitingFollowup) {
       return { result: meta.lastText, status: "done" };
     }
+    this.bindChildWatch(id, this.currentParent());
     if (meta?.resultPromise && !meta.consumed) {
       const settled = await meta.resultPromise;
       meta.consumed = true;
@@ -415,7 +504,7 @@ class IPythonCodeRuntime {
         (folded == null || folded === "") &&
         !(settled?.stopReason && settled.stopReason !== "running")
       ) {
-        folded = await this.waitContinuable(id);
+        folded = await this.waitContinuable(id, budget);
       } else if (folded) {
         meta.lastText = folded;
         meta.awaitingFollowup = false;
@@ -440,32 +529,40 @@ class IPythonCodeRuntime {
         diagnostic: settled?.diagnostic ?? null,
       };
     }
-    const result = await this.waitContinuable(id);
+    const result = await this.waitContinuable(id, budget);
     this.emit("rlm/wait", { id, status: "done" });
     return { result, status: "done" };
   }
 
-  async waitContinuable(id) {
+  async waitContinuable(id, timeoutMs) {
     const meta = this.children.get(id) || { lastText: null, assistantCount: 0, status: "running" };
     const seen = meta.assistantCount || 0;
-    const deadline = Date.now() + this.waitTimeoutMs;
-    let last = this.readChildSnapshot(id);
-    let stable = null;
-    let stableHits = 0;
-    let sawRunning = false;
+    const deadline = Date.now() + (Number.isFinite(timeoutMs) ? timeoutMs : this.waitTimeoutMs);
+    this.bindChildWatch(id, this.currentParent());
 
     const commit = (snap) => {
       const delta = Array.isArray(snap.parts) ? snap.parts.slice(seen).filter(Boolean) : [];
-      const text = delta.length ? sanitizeText(delta.join("\n\n")) : snap.text;
+      const text = delta.length ? sanitizeText(delta.join("\n\n")) : snap.text ?? meta.lastText ?? "";
       meta.lastText = text;
-      meta.assistantCount = snap.count;
+      meta.assistantCount = snap.count || meta.assistantCount || (text ? 1 : 0);
       meta.status = "done";
       meta.awaitingFollowup = false;
+      meta.settled = true;
       if (!this.children.has(id)) {
         this.children.set(id, { ...meta, id, name: meta.name ?? id, mode: meta.mode ?? "continuable" });
       }
       return text;
     };
+
+    if (meta.settled && (meta.lastText || meta.lastText === "")) {
+      const last0 = this.readChildSnapshot(id);
+      return commit(last0.text ? last0 : { text: meta.lastText, count: 1, parts: [meta.lastText] });
+    }
+
+    let last = this.readChildSnapshot(id);
+    let stable = null;
+    let stableHits = 0;
+    let sawRunning = false;
 
     while (Date.now() < deadline) {
       last = this.readChildSnapshot(id);
@@ -499,11 +596,18 @@ class IPythonCodeRuntime {
         const idle = !childAgent || childAgent.status === "idle" || sawRunning || stableHits >= 2;
         if (idle) return commit(last);
       }
-      await new Promise((r) => setTimeout(r, 250));
+      if (meta.settled && (meta.lastText || last.text)) {
+        return commit(last.text ? last : { text: meta.lastText, count: 1, parts: [meta.lastText] });
+      }
+      await Promise.race([
+        meta.settlePromise || new Promise((r) => setTimeout(r, 250)),
+        new Promise((r) => setTimeout(r, 250)),
+      ]);
     }
 
     last = this.readChildSnapshot(id);
     if (last?.text) return commit(last);
+    if (meta.lastText) return commit({ text: meta.lastText, count: 1, parts: [meta.lastText] });
     const agent = this.childAgent(id);
     throw new Error(
       `rlm.wait: timed out waiting for ${id} (agent=${agent ? agent.status : "missing"} messages=${last?.count ?? 0})`,
@@ -511,11 +615,16 @@ class IPythonCodeRuntime {
   }
 
   childAgent(id) {
-    try {
-      const agent = this.ctx.agents?.get?.(id);
-      if (agent && String(agent.id) === String(id)) return agent;
-    } catch {
-      /* optional */
+    const parent = this.currentParent();
+    const roots = [parent?.ctx, this.ctx];
+    for (const root of roots) {
+      try {
+        const agent = root?.agents?.get?.(id);
+        const aid = agent?.id ?? agent?.session?.id;
+        if (agent && String(aid) === String(id)) return agent;
+      } catch {
+        /* optional */
+      }
     }
     return null;
   }
@@ -533,7 +642,22 @@ class IPythonCodeRuntime {
   }
 
   readChildSnapshot(id) {
-    const session = this.ctx.sessions?.get?.(id) || this.ctx.sessions?.get?.(String(id));
+    const parent = this.currentParent();
+    const bags = [
+      this.ctx.sessions,
+      this.ctx.get?.("sessions"),
+      parent?.ctx?.sessions,
+      parent?.ctx?.get?.("sessions"),
+    ];
+    let session;
+    for (const bag of bags) {
+      try {
+        session = bag?.get?.(id) || bag?.get?.(String(id));
+        if (session) break;
+      } catch {
+        session = undefined;
+      }
+    }
     if (!session) return { text: null, count: 0, parts: [] };
     let messages = [];
     try {
@@ -854,6 +978,16 @@ function childIdFrom(out) {
   return out.subagentId ?? out.childId ?? out.id ?? out.rlm_child_id;
 }
 
+function foldBlocks(blocks) {
+  if (blocks == null) return null;
+  if (typeof blocks === "string") {
+    const s = sanitizeText(blocks).trim();
+    return s || null;
+  }
+  const text = assistantText({ content: blocks }) || outputValueText(blocks);
+  return text ? sanitizeText(text) : null;
+}
+
 function foldSubagentOutput(settled) {
   if (settled == null) return null;
   if (typeof settled === "string") {
@@ -986,6 +1120,11 @@ export function apply(ctx, config = {}) {
   });
   ctx.provide("codeRuntime", runtime);
   ctx.on("dispose", () => runtime.dispose());
+  try {
+    ctx.on("subagent/end", (info) => runtime.onChildEnded(info));
+  } catch {
+    /* optional */
+  }
   hookHaystackEvents(ctx, runtime);
   hookCompaction(ctx, runtime);
 }

@@ -218,8 +218,8 @@ print("ok-surrogate")
   const logs = (r.logs || []).join("\n");
   if (r.error) fail(`surrogate crash: ${r.error.message}`);
   else if (!logs.includes("ok-surrogate")) fail(`surrogate logs ${logs}`);
-  else if (!logs.includes("ver 0.4.7")) fail(`version not injected ${logs}`);
-  else if (!logs.includes("rlm 0.4.7")) fail(`execute banner ${logs}`);
+  else if (!logs.includes("ver 0.4.8")) fail(`version not injected ${logs}`);
+  else if (!logs.includes("rlm 0.4.8")) fail(`execute banner ${logs}`);
   else if (logs.includes("\uDCAC")) fail(`surrogate leaked into logs ${JSON.stringify(logs)}`);
   else console.log("ok surrogate sanitized");
   await provided.dispose();
