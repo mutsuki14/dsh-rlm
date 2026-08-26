@@ -262,6 +262,7 @@ class IPythonCodeRuntime {
             depth: remaining - 1,
             sessionDir: out.sessionDir ?? out.session_dir ?? "",
             model: out.model ?? "",
+            resultPromise: out.resultPromise ?? out.result,
           });
           this.bindChildWatch(id, parent);
           return {
@@ -499,12 +500,37 @@ class IPythonCodeRuntime {
   async waitChild(id, timeoutMs) {
     const budget = Number.isFinite(Number(timeoutMs)) ? Math.max(1000, Number(timeoutMs)) : this.waitTimeoutMs;
     const meta = this.children.get(id);
-    if (meta && (meta.status === "done" || meta.status === "error") && meta.lastText != null && !meta.awaitingFollowup) {
-      return { result: meta.lastText, status: meta.status };
+    if (
+      meta &&
+      (meta.status === "done" || meta.status === "error" || meta.status === "timeout") &&
+      !meta.awaitingFollowup &&
+      (meta.lastText != null || meta.status === "timeout")
+    ) {
+      return { result: meta.lastText ?? null, status: meta.status };
     }
     this.bindChildWatch(id, this.currentParent());
     if (meta?.resultPromise && !meta.consumed) {
-      const settled = await meta.resultPromise;
+      const cap = delay(budget);
+      let settled;
+      let timedOut = false;
+      try {
+        const winner = await Promise.race([
+          Promise.resolve(meta.resultPromise).then((v) => ({ kind: "end", v })),
+          cap.promise.then(() => ({ kind: "timeout" })),
+        ]);
+        if (winner.kind === "timeout") timedOut = true;
+        else settled = winner.v;
+      } finally {
+        cap.clear();
+      }
+      if (timedOut) {
+        const snap = this.readChildSnapshot(id);
+        const text = sanitizeText(snap?.text || meta.lastText || "");
+        if (text) meta.lastText = text;
+        if (meta.status !== "error") meta.status = "timeout";
+        this.emit("rlm/wait", { id, status: meta.status });
+        return { result: text || null, status: meta.status };
+      }
       meta.consumed = true;
       let folded = foldSubagentOutput(settled);
       if (
@@ -537,7 +563,8 @@ class IPythonCodeRuntime {
       };
     }
     const result = await this.waitContinuable(id, budget);
-    const status = this.children.get(id)?.status === "error" ? "error" : "done";
+    const st = this.children.get(id)?.status;
+    const status = st === "error" ? "error" : st === "timeout" ? "timeout" : "done";
     this.emit("rlm/wait", { id, status });
     return { result, status };
   }
@@ -616,12 +643,14 @@ class IPythonCodeRuntime {
     }
 
     last = this.readChildSnapshot(id);
-    if (last?.text) return commit(last);
-    if (meta.lastText) return commit({ text: meta.lastText, count: 1, parts: [meta.lastText] });
-    const agent = this.childAgent(id);
-    throw new Error(
-      `rlm.wait: timed out waiting for ${id} (agent=${agent ? agent.status : "missing"} messages=${last?.count ?? 0})`,
-    );
+    const text = sanitizeText(last?.text || meta.lastText || "");
+    meta.lastText = text;
+    if (meta.status !== "error") meta.status = "timeout";
+    meta.awaitingFollowup = false;
+    if (!this.children.has(id)) {
+      this.children.set(id, { ...meta, id, name: meta.name ?? id, mode: meta.mode ?? "continuable" });
+    }
+    return text;
   }
 
   childAgent(id) {
