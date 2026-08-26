@@ -10,7 +10,7 @@ from typing import Any
 
 from .host import host_request, host_request_sync
 
-RLM_VERSION = "0.4.16"
+RLM_VERSION = "0.4.17"
 _SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
 
 
@@ -172,19 +172,73 @@ class Path:
         return f"Path({self.path!r})"
 
 
-def load_haystack() -> str:
-    return host_request_sync("rlm.load_haystack", {}) or ""
+class AwaitStr(str):
+    def __await__(self):
+        async def _ret():
+            return str(self)
+
+        return _ret().__await__()
 
 
-def set_haystack(text: str) -> None:
+class AwaitDict(dict):
+    def __await__(self):
+        async def _ret():
+            return dict(self)
+
+        return _ret().__await__()
+
+
+class AwaitList(list):
+    def __await__(self):
+        async def _ret():
+            return list(self)
+
+        return _ret().__await__()
+
+
+class AwaitNone:
+    def __await__(self):
+        async def _ret():
+            return None
+
+        return _ret().__await__()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "None"
+
+
+def _box(value: Any) -> Any:
+    if value is None:
+        return AwaitNone()
+    if isinstance(value, (AwaitStr, AwaitDict, AwaitList, AwaitNone)):
+        return value
+    if isinstance(value, str):
+        return AwaitStr(value)
+    if isinstance(value, dict):
+        return AwaitDict(value)
+    if isinstance(value, list):
+        return AwaitList(value)
+    return value
+
+
+def load_haystack() -> Any:
+    return _box(host_request_sync("rlm.load_haystack", {}) or "")
+
+
+def set_haystack(text: str) -> Any:
     host_request_sync("rlm.set_haystack", {"text": str(text)})
+    return _box(None)
 
 
-def save_skill(name: str, code: str, description: str | None = None) -> None:
+def save_skill(name: str, code: str, description: str | None = None) -> Any:
     host_request_sync(
         "rlm.save_skill",
         {"name": name, "code": code, "description": description or ""},
     )
+    return _box(None)
 
 
 def chunk(s: Any, n: int) -> list[str]:
@@ -244,22 +298,23 @@ def install(ns: dict[str, Any] | None = None) -> None:
         kebab = name.replace("_", "-")
         if isinstance(payload, dict) and payload.get("name"):
             kebab = str(payload.get("name"))
-        return {
+        return _box({
             "name": kebab,
             "code": code,
             "root": root,
             "module": module,
             "init": init,
-        }
+        })
 
     def set_haystack(text: str) -> None:
         value = str(text)
         host_request_sync("rlm.set_haystack", {"text": value})
         target["context"] = value
+        return _box(None)
 
-    def list_skills() -> list[str]:
+    def list_skills() -> Any:
         rows = host_request_sync("rlm.list_skills", {}) or []
-        return list(rows)
+        return _box(list(rows))
 
     target["rlm"] = rlm
     target["RLMSpawnHandle"] = RLMSpawnHandle

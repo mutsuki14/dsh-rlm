@@ -12,6 +12,7 @@ Invariants:
 - %%bash / %%pwsh as a cell (or after Python in the same cell). await tools.bash("ls")
   is rewritten to pwsh on Windows.
 - load_haystack() / save_skill(name, code, description=...) / load_skill(name).
+  These are sync but awaitable (`await save_skill(...)` is fine).
   load_skill imports into the kernel and returns {name, code, root, module}.
   Skills are kebab-case packages with SKILL.md + __init__.py.
 - Call tools as await tools.name(args) only when the host binding exists.

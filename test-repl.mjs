@@ -198,6 +198,12 @@ const saved = await kmSkill.execute(
 if (saved.error) fail(`skill: ${saved.error.message}`);
 if (saved.value !== 42) fail(`skill double ${JSON.stringify(saved)}`);
 if (!(saved.logs || []).join("\n").includes("skillname double")) fail(`load_skill dict ${JSON.stringify(saved.logs)}`);
+const savedAwait = await kmSkill.execute(
+  "await save_skill('triple', 'def triple(x):\\n    return x * 3\\n')\ninfo = await load_skill('triple')\nprint('awaited', info['name'])\ntriple(7)",
+);
+if (savedAwait.error) fail(`await skill: ${savedAwait.error.message}`);
+if (savedAwait.value !== 21) fail(`await triple ${JSON.stringify(savedAwait)}`);
+if (!(savedAwait.logs || []).join("\n").includes("awaited triple")) fail(`await load ${JSON.stringify(savedAwait.logs)}`);
 await kmSkill.shutdown();
 
 const km5 = new KernelManager("inspect", async (method) => {
