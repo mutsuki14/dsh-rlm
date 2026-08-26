@@ -24,4 +24,10 @@ A later home-level `cordis.patch.yml` that writes `tools` again will overwrite t
 node test-repl.mjs
 ```
 
-Kernel is not a sandbox. Keep DSH's existing sandbox. `%%bash` / `tools.*` must host_request back into `tools/execute`.
+Windows: the kernel looks for `py -3`, then `python`, then `python3`. If spawn still fails with exit 9009, set:
+
+```sh
+set DSH_RLM_PYTHON=C:\Path\To\python.exe
+```
+
+and restart the profile.
