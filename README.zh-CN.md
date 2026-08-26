@@ -11,9 +11,9 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add github:mutsuki14/seam-rlm
+dsh plugin --profile web add github:mutsuki14/dsh-rlm
 # 已经装过：
-dsh plugin --profile web update github:mutsuki14/seam-rlm
+dsh plugin --profile web update github:mutsuki14/dsh-rlm
 ```
 
 需要 Node 22+、Python 3（Windows 会依次找 `py -3` / `python` / `python3`，也可设 `DSH_RLM_PYTHON`）。装完请 **重启 profile**。

@@ -5,13 +5,13 @@
 `package.json` 声明了 `dsh.bundle.patch`。`dsh plugin add` 会把该文件叠成 **顶层 YAML 数组形态的 loader 补丁**，不是 `cordis.yml` 对象。插件入口必须是 **JavaScript**（Node 不会对 `node_modules` 里的 `.ts` 剥类型）。
 
 ```sh
-dsh plugin --profile web add github:mutsuki14/seam-rlm
+dsh plugin --profile web add github:mutsuki14/dsh-rlm
 ```
 
 已经装过旧版：
 
 ```sh
-dsh plugin --profile web update github:mutsuki14/seam-rlm
+dsh plugin --profile web update github:mutsuki14/dsh-rlm
 ```
 
 然后重启 profile。这一层会：

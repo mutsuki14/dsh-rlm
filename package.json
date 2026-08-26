@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mutsuki14/seam-rlm.git"
+    "url": "https://github.com/mutsuki14/dsh-rlm.git"
   },
   "dsh": {
     "bundle": {

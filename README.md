@@ -11,9 +11,9 @@ It replaces the per-turn worker-thread `codeRuntime` with a **long-lived Python 
 ## Install
 
 ```sh
-dsh plugin --profile web add github:mutsuki14/seam-rlm
+dsh plugin --profile web add github:mutsuki14/dsh-rlm
 # already installed:
-dsh plugin --profile web update github:mutsuki14/seam-rlm
+dsh plugin --profile web update github:mutsuki14/dsh-rlm
 ```
 
 Requires Node 22+, Python 3 (`py -3` / `python` / `python3`, or `DSH_RLM_PYTHON`). Restart the profile after install.

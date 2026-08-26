@@ -5,13 +5,13 @@ English | [中文](INSTALL.zh-CN.md)
 `package.json` declares `dsh.bundle.patch`. `dsh plugin add` stacks that file as a **top-level YAML array of loader patch entries** — not a `cordis.yml` object. Plugin entries are **JavaScript** (Node will not strip types under `node_modules`).
 
 ```sh
-dsh plugin --profile web add github:mutsuki14/seam-rlm
+dsh plugin --profile web add github:mutsuki14/dsh-rlm
 ```
 
 If an older copy is already installed:
 
 ```sh
-dsh plugin --profile web update github:mutsuki14/seam-rlm
+dsh plugin --profile web update github:mutsuki14/dsh-rlm
 ```
 
 Then restart the profile. The layer:
