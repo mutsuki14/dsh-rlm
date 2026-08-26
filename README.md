@@ -21,7 +21,7 @@ DSH already has the seams (`ctx.codeRuntime`, `ctx.subagents`, `tools.mode = cod
 |---|---|
 | `@seamlabs/dsh-rlm/runtime` | `ctx.codeRuntime` |
 | `@seamlabs/dsh-rlm/bindings` | `rlm()` → subagents |
-| `@seamlabs/dsh-rlm/persona` | `presentAs('code')` + preamble |
+| `@seamlabs/dsh-rlm/persona` | `systemPrompt.section` preamble (`tools.mode: code` is the patch) |
 | `@seamlabs/dsh-rlm/snapshot` | kernel namespace → SessionEvent |
 
 Declare every `@deepseek-ai/*` host package as a **peerDependency**.

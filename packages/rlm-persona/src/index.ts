@@ -2,15 +2,14 @@ import type { Context } from "@deepseek-ai/cordis";
 import { RLM_PREAMBLE } from "./prompt";
 
 export const name = "@seamlabs/dsh-rlm/persona";
-export const inject = ["tools", "systemPrompt"];
+export const inject = ["systemPrompt"];
 
 export function apply(ctx: Context) {
-  ctx.tools.presentAs("code");
-  ctx.systemPrompt.register({
-    id: "rlm:preamble",
+  // Global Code Mode is the tools row (`mode: code` in cordis.patch.yml).
+  // presentAs() is agent/preset-scoped and throws from a plugin context.
+  ctx.systemPrompt.section({
+    name: "rlm:preamble",
     order: 20,
-    async render() {
-      return RLM_PREAMBLE;
-    },
+    text: RLM_PREAMBLE,
   });
 }

@@ -19,15 +19,12 @@ Do not paste large files into rlm() or into the next cell as literals.
 
 // packages/rlm-persona/src/index.ts
 var name = "@seamlabs/dsh-rlm/persona";
-var inject = ["tools", "systemPrompt"];
+var inject = ["systemPrompt"];
 function apply(ctx) {
-  ctx.tools.presentAs("code");
-  ctx.systemPrompt.register({
-    id: "rlm:preamble",
+  ctx.systemPrompt.section({
+    name: "rlm:preamble",
     order: 20,
-    async render() {
-      return RLM_PREAMBLE;
-    }
+    text: RLM_PREAMBLE
   });
 }
 export {
