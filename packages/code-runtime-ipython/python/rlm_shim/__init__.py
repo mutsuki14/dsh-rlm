@@ -124,6 +124,10 @@ def load_haystack() -> str:
     return host_request_sync("rlm.load_haystack", {}) or ""
 
 
+def set_haystack(text: str) -> None:
+    host_request_sync("rlm.set_haystack", {"text": str(text)})
+
+
 def save_skill(name: str, code: str) -> None:
     host_request_sync("rlm.save_skill", {"name": name, "code": code})
 
@@ -152,11 +156,15 @@ def install(ns: dict[str, Any] | None = None) -> None:
     target["RLMSpawnHandle"] = RLMSpawnHandle
     target["Path"] = Path
     target["load_haystack"] = load_haystack
+    target["set_haystack"] = set_haystack
     target["save_skill"] = save_skill
     target["load_skill"] = load_skill
     target["list_skills"] = list_skills
     target["chunk"] = chunk
     target.setdefault("tools", _ToolsProxy("tools", ["bash", "read", "write"]))
+    # Seed empty context; host injects haystack via injectNamespace / rlm.set_haystack.
+    # Do NOT call load_haystack() here — install runs at kernel boot before the host loop.
+    target.setdefault("context", "")
 
 
 def bind(spec_json: Any, ns: dict[str, Any] | None = None) -> None:
@@ -190,6 +198,7 @@ _SKIP = {
     "RLMSpawnHandle",
     "Path",
     "load_haystack",
+    "set_haystack",
     "save_skill",
     "load_skill",
     "list_skills",
