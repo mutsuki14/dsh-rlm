@@ -2,6 +2,8 @@ import { apply } from "./packages/code-runtime-ipython/src/index.js";
 
 const parent = { id: "parent-1", session: { id: "parent-1", dir: "/tmp" } };
 let provided;
+let startCount = 0;
+const startedAt = [];
 
 const ctx = {
   provide(name, value) {
@@ -11,6 +13,7 @@ const ctx = {
   get(key) {
     if (key === "agent") return parent;
     if (key === "agentSessionId") return parent.id;
+    if (key === "rlm.haystack") return "haystack-needle-haystack";
     return undefined;
   },
   agents: {
@@ -20,16 +23,27 @@ const ctx = {
     get: () => parent,
   },
   subagents: {
-    start: async () => ({
-      id: "c3fb07d4-eafa-4f9b-ac1b-fd6c11c3af86",
-      result: Promise.resolve({
-        output: [
-          { type: "thinking", text: "The user asks to reply with exactly PONG." },
-          { type: "text", text: "PONG" },
-        ],
-        stopReason: "completed",
-      }),
-    }),
+    start: async (_kind, req) => {
+      startCount += 1;
+      const n = startCount;
+      const id = `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+      startedAt.push(Date.now());
+      const delay = 80;
+      return {
+        id,
+        result: new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({
+              output: [
+                { type: "thinking", text: "thinking..." },
+                { type: "text", text: n === 1 ? "AAA" : "BBB" },
+              ],
+              stopReason: "completed",
+            });
+          }, delay);
+        }),
+      };
+    },
     listChildren: async () => [],
   },
   sessions: { get: () => undefined },
@@ -39,36 +53,100 @@ const ctx = {
 apply(ctx);
 if (!provided) throw new Error("apply did not provide codeRuntime");
 
-const result = await provided.run({
-  program: `
+{
+  startCount = 0;
+  const result = await provided.run({
+    program: `
 h = await rlm("reply with just PONG", name="ping-1")
 print("id", h.rlm_child_id)
+print("status", h.status)
 got = await h.wait()
 print("got", got)
 print("handle.result", h.result)
 `,
-  bindings: [],
-});
+    bindings: [],
+  });
+  const logs = (result.logs || []).join("\n");
+  console.log("--- single ---");
+  console.log(logs);
+  if (result.error) {
+    console.error("FAIL single:", result.error);
+    process.exit(1);
+  }
+  if (!logs.includes("AAA")) {
+    console.error("FAIL: expected AAA from first child");
+    process.exit(1);
+  }
+  if (!logs.includes("status running")) {
+    console.error("FAIL: expected non-blocking status running, got:", logs);
+    process.exit(1);
+  }
+}
 
-const logs = (result.logs || []).join("\n");
-console.log("--- logs ---");
-console.log(logs);
-console.log("--- error ---");
-console.log(result.error ?? "(none)");
-console.log("--- value ---");
-console.log(result.value);
+{
+  startCount = 0;
+  startedAt.length = 0;
+  const t0 = Date.now();
+  const result = await provided.run({
+    program: `
+a = await rlm("left", name="L")
+b = await rlm("right", name="R")
+print("spawned", a.status, b.status)
+ra = await a.wait()
+rb = await b.wait()
+print(ra, rb)
+`,
+    bindings: [],
+  });
+  const logs = (result.logs || []).join("\n");
+  console.log("--- parallel ---");
+  console.log(logs);
+  if (result.error) {
+    console.error("FAIL parallel:", result.error);
+    process.exit(1);
+  }
+  if (!logs.includes("AAA") || !logs.includes("BBB")) {
+    console.error("FAIL: expected AAA BBB");
+    process.exit(1);
+  }
+  if (!logs.includes("spawned running running")) {
+    console.error("FAIL: both handles should be running before wait");
+    process.exit(1);
+  }
+  if (startedAt.length >= 2 && startedAt[1] - startedAt[0] > 50) {
+    console.error("FAIL: sequential spawn detected", startedAt);
+    process.exit(1);
+  }
+  console.log("elapsed_ms", Date.now() - t0);
+}
 
-if (result.error) {
-  console.error("FAIL: kernel error");
-  process.exit(1);
+{
+  const result = await provided.run({
+    program: `
+print("ctx", context)
+print("hay", load_haystack())
+print("find", context.find("needle"))
+`,
+    bindings: [],
+    haystack: "haystack-needle-haystack",
+  });
+  const logs = (result.logs || []).join("\n");
+  console.log("--- haystack ---");
+  console.log(logs);
+  if (result.error) {
+    console.error("FAIL haystack:", result.error);
+    process.exit(1);
+  }
+  if (!logs.includes("find 9") && !String(result.value).includes("9")) {
+    const ok =
+      logs.includes("needle") &&
+      (logs.includes("9") || result.value === 9);
+    if (!ok) {
+      console.error("FAIL: context/haystack not injected", logs, result.value);
+      process.exit(1);
+    }
+  }
 }
-if (!logs.includes("PONG")) {
-  console.error("FAIL: expected PONG in logs, got:", JSON.stringify(logs));
-  process.exit(1);
-}
-if (!logs.includes("c3fb07d4-eafa-4f9b-ac1b-fd6c11c3af86")) {
-  console.error("FAIL: expected child id in logs");
-  process.exit(1);
-}
-console.log("ok dsh-rlm wait fold + host rlm.run/wait");
+
+console.log("ok dsh-rlm non-blocking wait + parallel + haystack");
 await provided.dispose();
