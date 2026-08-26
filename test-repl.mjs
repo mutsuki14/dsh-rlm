@@ -20,8 +20,8 @@ const fail = (msg) => {
 await km.start();
 
 const a = await km.execute("n = 41\nprint('set n')\nn");
-<if (a.error) fail(a.error.message);
-< (a.value !== 41) fail(`expected 41 got ${JSON.stringify(a.value)}`);
+if (a.error) fail(a.error.message);
+if (a.value !== 41) fail(`expected 41 got ${JSON.stringify(a.value)}`);
 if (!a.logs.includes("set n")) fail(`logs ${a.logs}`);
 
 const b = await km.execute("n + 1");
