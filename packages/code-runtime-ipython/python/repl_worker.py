@@ -127,16 +127,28 @@ class _TopReturn(ast.NodeTransformer):
         return ast.Expr(value=val)
 
 
-def _run_cell(src: str) -> tuple[Any, list[str]]:
-    stripped = src.lstrip()
-    if stripped.startswith("%%bash"):
-        script = stripped[6:].lstrip("\n")
-        value = _host_request(
+def _run_bash(script: str) -> Any:
+    try:
+        return _host_request(
             "tools.dispatch",
             {"global": "tools", "name": "bash", "args": {"command": script}},
         )
-        text = "" if value is None else str(value)
-        return value, [text] if text else []
+    except RuntimeError:
+        return _host_request(
+            "tools.dispatch",
+            {"global": "tools", "name": "pwsh", "args": {"command": script}},
+        )
+
+
+def _split_bash_magic(src: str) -> tuple[str, str | None]:
+    lines = src.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.strip() == "%%bash":
+            return "".join(lines[:i]), "".join(lines[i + 1 :])
+    return src, None
+
+
+def _run_python(src: str) -> tuple[Any, list[str]]:
     tree = ast.parse(src)
     tree = _TopReturn().visit(tree)
     ast.fix_missing_locations(tree)
@@ -162,10 +174,26 @@ def _run_cell(src: str) -> tuple[Any, list[str]]:
         elif not body:
             _run(compile(ast.Module([last], type_ignores=[]), "<cell>", "exec", flags=flags))
         elif not isinstance(last, ast.Expr):
-            # last already included in body
             pass
     logs = [_clean_str(line) for line in buf.getvalue().splitlines()]
     return _clean(value), logs
+
+
+def _run_cell(src: str) -> tuple[Any, list[str]]:
+    pre, bash = _split_bash_magic(src)
+    logs: list[str] = []
+    value: Any = None
+    if pre.strip():
+        value, logs = _run_python(pre)
+    if bash is not None:
+        raw = _run_bash(bash)
+        text = "" if raw is None else str(raw)
+        if text:
+            logs = [*logs, _clean_str(text)]
+        return _clean(raw) if pre.strip() == "" else value, logs
+    if pre.strip():
+        return value, logs
+    return None, []
 
 
 def handle(msg: dict[str, Any]) -> dict[str, Any]:

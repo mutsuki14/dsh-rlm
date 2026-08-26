@@ -91,6 +91,27 @@ if (pth.error) fail(`path: ${pth.error.message}`);
 if (pth.value !== 2) fail(`path find ${JSON.stringify(pth)}`);
 await km4.shutdown();
 
+const hayStore = { text: "" };
+const kmHaySet = new KernelManager("hayset", async (method, params) => {
+  if (method === "rlm.set_haystack") {
+    hayStore.text = String(params.text ?? "");
+    return true;
+  }
+  if (method === "rlm.load_haystack") return hayStore.text;
+  if (method === "tools.dispatch" && params.name === "bash") return "bash-ok";
+  throw new Error(`unexpected host ${method}`);
+});
+await kmHaySet.start();
+const sameCell = await kmHaySet.execute(
+  'set_haystack("needle-at-offset-XYZ")\ncontext.find("XYZ")',
+);
+if (sameCell.error) fail(`same-cell haystack: ${sameCell.error.message}`);
+if (sameCell.value !== 17) fail(`same-cell context stale ${JSON.stringify(sameCell)}`);
+const mixed = await kmHaySet.execute('x = 1\nprint("py", x)\n%%bash\necho bash-ok');
+if (mixed.error) fail(`mixed bash: ${mixed.error.message}`);
+if (!(mixed.logs || []).join("\n").includes("py 1")) fail(`mixed py logs ${JSON.stringify(mixed.logs)}`);
+await kmHaySet.shutdown();
+
 const skillStore = new Map();
 const kmSkill = new KernelManager("skill", async (method, params) => {
   if (method === "rlm.save_skill") {

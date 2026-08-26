@@ -170,7 +170,17 @@ class IPythonCodeRuntime {
       if (method === "rlm.delete_subagent") return this.deleteChild(String(params.rlm_child_id));
       if (method === "rlm.load_haystack") return this.resolveHaystack(this.sessionId());
       if (method === "rlm.set_haystack") {
-        this.setHaystack(this.sessionId(), params.text ?? params.haystack ?? "", { rebind: true });
+        const text = String(params.text ?? params.haystack ?? "");
+        const sid = this.sessionId();
+        this.setHaystack(sid, text, { rebind: true });
+        const km = this.kernels.get(sid) || this.kernels.get(this.activeKernel);
+        if (km) {
+          try {
+            await km.injectNamespace({ context: text });
+          } catch {
+            /* shim also assigns NS["context"] */
+          }
+        }
         return true;
       }
       if (method === "rlm.save_skill") return this.saveSkillPackage(params);
@@ -179,11 +189,16 @@ class IPythonCodeRuntime {
       if (method === "tools.dispatch") {
         const bindings = this.currentBindings();
         const ns = bindings.find((b) => b.global === (params.global ?? "tools"));
-        const fn = ns?.functions?.[params.name];
+        let name = params.name;
+        let fn = ns?.functions?.[name];
+        if (typeof fn !== "function" && name === "bash") {
+          name = ns?.functions?.pwsh ? "pwsh" : ns?.functions?.shell ? "shell" : name;
+          fn = ns?.functions?.[name];
+        }
         if (typeof fn === "function") return fn(params.args);
         return this.ctx.tools.execute({
           global: params.global,
-          name: params.name,
+          name,
           args: params.args,
         });
       }
@@ -682,24 +697,24 @@ Load from the RLM kernel with \`load_skill("${kebab}")\`. Implementation is \`__
   }
 
   async maybeInjectContext(km, sessionId) {
-    if (this.contextInjected.has(sessionId)) return;
     const hay = this.resolveHaystack(sessionId);
-    if (hay === "") return;
+    let current;
     try {
       const ns = await km.inspectNamespace();
-      if (ns && typeof ns.context === "string" && ns.context !== "") {
-        this.contextInjected.add(sessionId);
-        return;
-      }
+      current = ns?.context;
     } catch {
-      /* inspect optional */
+      current = undefined;
+    }
+    if (current === hay) {
+      this.contextInjected.add(sessionId);
+      return;
     }
     try {
-      await km.injectNamespace({ context: hay });
+      await km.injectNamespace({ context: hay ?? "" });
       this.contextInjected.add(sessionId);
     } catch {
       try {
-        await km.execute(`context = ${JSON.stringify(hay)}\n`);
+        await km.execute(`context = ${JSON.stringify(hay ?? "")}\n`);
         this.contextInjected.add(sessionId);
       } catch {
         /* best-effort */

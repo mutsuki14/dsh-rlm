@@ -10,7 +10,7 @@ from typing import Any
 
 from .host import host_request, host_request_sync
 
-RLM_VERSION = "0.4.6"
+RLM_VERSION = "0.4.7"
 _SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
 
 
@@ -232,6 +232,11 @@ def install(ns: dict[str, Any] | None = None) -> None:
         if not loaded and code:
             exec(compile(code, f"<skill:{name}>", "exec"), target)
         return code
+
+    def set_haystack(text: str) -> None:
+        value = str(text)
+        host_request_sync("rlm.set_haystack", {"text": value})
+        target["context"] = value
 
     def list_skills() -> list[str]:
         rows = host_request_sync("rlm.list_skills", {}) or []
