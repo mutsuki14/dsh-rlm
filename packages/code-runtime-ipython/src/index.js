@@ -174,17 +174,10 @@ class IPythonCodeRuntime {
       if (method === "rlm.delete_subagent") return this.deleteChild(String(params.rlm_child_id));
       if (method === "rlm.load_haystack") return this.resolveHaystack(this.sessionId());
       if (method === "rlm.set_haystack") {
-        const text = String(params.text ?? params.haystack ?? "");
-        const sid = this.sessionId();
-        this.setHaystack(sid, text, { rebind: true });
-        const km = this.kernels.get(sid) || this.kernels.get(this.activeKernel);
-        if (km) {
-          try {
-            await km.injectNamespace({ context: text });
-          } catch {
-            /* shim also assigns NS["context"] */
-          }
-        }
+        // Do NOT injectNamespace here: the kernel is blocked in host_request_sync
+        // waiting for this reply. Injecting into the same worker deadlocks.
+        // The shim assigns NS["context"] after the host returns.
+        this.setHaystack(this.sessionId(), params.text ?? params.haystack ?? "", { rebind: true });
         return true;
       }
       if (method === "rlm.save_skill") return this.saveSkillPackage(params);

@@ -4,7 +4,7 @@ English | [中文](README.zh-CN.md)
 
 Persistent **Recursive Language Model** runtime for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
-Current release line: **v0.4.8** (`wait()` listens for `subagent/end`; no longer needs child session visibility).
+Current release line: **v0.4.9** (`set_haystack` no longer deadlocks the kernel).
 
 It replaces the per-turn worker-thread `codeRuntime` with a **long-lived Python kernel**, exposes non-blocking `await rlm()` (parallel fan-out + `wait()`), follows up the **same child** with `handle.message()`, injects `context` from haystack, and stores skills as kebab-case packages (`SKILL.md` + `__init__.py`).
 
