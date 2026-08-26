@@ -499,8 +499,8 @@ class IPythonCodeRuntime {
   async waitChild(id, timeoutMs) {
     const budget = Number.isFinite(Number(timeoutMs)) ? Math.max(1000, Number(timeoutMs)) : this.waitTimeoutMs;
     const meta = this.children.get(id);
-    if (meta && meta.status === "done" && meta.lastText != null && !meta.awaitingFollowup) {
-      return { result: meta.lastText, status: "done" };
+    if (meta && (meta.status === "done" || meta.status === "error") && meta.lastText != null && !meta.awaitingFollowup) {
+      return { result: meta.lastText, status: meta.status };
     }
     this.bindChildWatch(id, this.currentParent());
     if (meta?.resultPromise && !meta.consumed) {
@@ -537,8 +537,9 @@ class IPythonCodeRuntime {
       };
     }
     const result = await this.waitContinuable(id, budget);
-    this.emit("rlm/wait", { id, status: "done" });
-    return { result, status: "done" };
+    const status = this.children.get(id)?.status === "error" ? "error" : "done";
+    this.emit("rlm/wait", { id, status });
+    return { result, status };
   }
 
   async waitContinuable(id, timeoutMs) {
@@ -552,7 +553,7 @@ class IPythonCodeRuntime {
       const text = delta.length ? sanitizeText(delta.join("\n\n")) : snap.text ?? meta.lastText ?? "";
       meta.lastText = text;
       meta.assistantCount = snap.count || meta.assistantCount || (text ? 1 : 0);
-      meta.status = "done";
+      if (meta.status !== "error") meta.status = "done";
       meta.awaitingFollowup = false;
       meta.settled = true;
       if (!this.children.has(id)) {

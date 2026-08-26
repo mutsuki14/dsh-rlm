@@ -85,3 +85,78 @@ if (!logs.includes("peek") || !logs.includes("AAA")) {
 }
 console.log("ok subagent/end wait without child session");
 await provided.dispose();
+
+const listeners2 = {};
+const parent2 = {
+  id: "parent-2",
+  session: { id: "parent-2", dir: "/tmp", header: { cwd: "/tmp" } },
+  ctx: {
+    on(name, fn) {
+      (listeners2[name] ||= []).push(fn);
+    },
+    agents: { get: () => undefined },
+    sessions: { get: () => undefined },
+  },
+};
+let provided2;
+const ctx2 = {
+  provide(name, value) {
+    if (name === "codeRuntime") provided2 = value;
+  },
+  on(name, fn) {
+    (listeners2[name] ||= []).push(fn);
+  },
+  get(key) {
+    if (key === "agent") return parent2;
+    if (key === "agentSessionId") return parent2.id;
+    if (key === "sessions") return { get: () => undefined };
+    return undefined;
+  },
+  agents: {
+    currentInitiator: () => parent2,
+    list: () => [parent2],
+    roots: () => [parent2],
+    get: () => undefined,
+  },
+  subagents: {
+    startContinuable: async () => ({ childId: "child-err", messageId: "m2" }),
+    listChildren: async () => [],
+  },
+  sessions: { get: () => undefined },
+  tools: { execute: async () => null },
+};
+apply(ctx2);
+const run2 = provided2.run({
+  program: `
+h = await rlm("boom", name="e")
+print("got", await h.wait())
+print("st", h.status)
+`,
+  bindings: [],
+});
+await new Promise((r) => setTimeout(r, 200));
+for (const fn of listeners2["subagent/end"] || []) {
+  fn({
+    id: "child-err",
+    stopReason: "error",
+    lastAssistantMessage: [{ type: "text", text: "partial-review" }],
+  });
+}
+const result2 = await run2;
+const logs2 = (result2.logs || []).join("\n");
+console.log(logs2);
+if (result2.error) {
+  console.error(result2.error);
+  process.exit(1);
+}
+if (!logs2.includes("got partial-review")) {
+  console.error("expected partial text", logs2);
+  process.exit(1);
+}
+if (!logs2.includes("st error")) {
+  console.error("expected status error, got", logs2);
+  process.exit(1);
+}
+console.log("ok wait preserves error status");
+await provided2.dispose();
+

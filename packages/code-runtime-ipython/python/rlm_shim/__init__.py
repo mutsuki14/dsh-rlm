@@ -10,7 +10,7 @@ from typing import Any
 
 from .host import host_request, host_request_sync
 
-RLM_VERSION = "0.4.12"
+RLM_VERSION = "0.4.13"
 _SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
 
 
