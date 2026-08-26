@@ -10,7 +10,7 @@ from typing import Any
 
 from .host import host_request, host_request_sync
 
-RLM_VERSION = "0.4.11"
+RLM_VERSION = "0.4.12"
 _SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
 
 
@@ -270,6 +270,44 @@ def install(ns: dict[str, Any] | None = None) -> None:
     # Seed empty context; host injects haystack via injectNamespace / rlm.set_haystack.
     # Do NOT call load_haystack() here — install runs at kernel boot before the host loop.
     target.setdefault("context", "")
+    _install_pathlib_guard()
+
+
+def _install_pathlib_guard() -> None:
+    """Route pathlib.Path read/write through the host sandbox (no raw open())."""
+    import pathlib as _pl
+
+    concrete = type(_pl.Path())
+    if getattr(concrete, "_rlm_guarded", False):
+        return
+    facade = Path
+
+    class RlmPath(concrete):  # type: ignore[misc,valid-type]
+        def read_text(self, encoding: str = "utf-8", errors: str | None = None) -> str:  # type: ignore[override]
+            return facade(str(self)).read_text(encoding=encoding or "utf-8")
+
+        def write_text(  # type: ignore[override]
+            self,
+            data: str,
+            encoding: str = "utf-8",
+            errors: str | None = None,
+            newline: str | None = None,
+        ) -> int:
+            return facade(str(self)).write_text(str(data), encoding=encoding or "utf-8")
+
+        def open(self, mode: str = "r", *args: Any, **kwargs: Any):  # type: ignore[override]
+            writing = any(ch in str(mode) for ch in "wax+")
+            if writing:
+                raise RuntimeError(
+                    "RLM: pathlib.Path.open() writes are blocked; use write_text() so the host sandbox sees them"
+                )
+            from io import StringIO
+
+            return StringIO(facade(str(self)).read_text())
+
+    RlmPath._rlm_guarded = True  # type: ignore[attr-defined]
+    _pl.Path = RlmPath  # type: ignore[misc,assignment]
+    setattr(_pl, concrete.__name__, RlmPath)
 
 
 def bind(spec_json: Any, ns: dict[str, Any] | None = None) -> None:

@@ -89,6 +89,26 @@ if (hay.value !== "haystack-needle-haystack") fail(`hay ${JSON.stringify(hay)}`)
 const pth = await km4.execute('p = Path("haystack.txt")\np.read_text().find("needle")');
 if (pth.error) fail(`path: ${pth.error.message}`);
 if (pth.value !== 2) fail(`path find ${JSON.stringify(pth)}`);
+const writes = [];
+const kmPathlib = new KernelManager("pathlib", async (method, params) => {
+  if (method === "tools.dispatch" && params.name === "write") {
+    writes.push(params.args);
+    return true;
+  }
+  if (method === "tools.dispatch" && params.name === "read") {
+    return { lines: [{ number: 1, text: "host-bytes" }] };
+  }
+  throw new Error(`unexpected host ${method}`);
+});
+await kmPathlib.start();
+const libp = await kmPathlib.execute(
+  'from pathlib import Path as P\np = P("/tmp/rlm-guard.txt")\nn = p.write_text("hello-host")\nprint("n", n)\nprint("r", p.read_text())',
+);
+if (libp.error) fail(`pathlib guard: ${libp.error.message}`);
+const libLogs = (libp.logs || []).join("\n");
+if (!libLogs.includes("hello-host") && !libLogs.includes("host-bytes")) fail(`pathlib read ${libLogs}`);
+if (!writes.length || writes[0].content !== "hello-host") fail(`pathlib write not hosted ${JSON.stringify(writes)}`);
+await kmPathlib.shutdown();
 await km4.shutdown();
 
 const hayStore = { text: "" };

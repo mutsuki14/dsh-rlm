@@ -120,6 +120,8 @@ save_skill("double", "def double(x):\\n    return x * 2\\n", "multiply by two")
 print("skills", list_skills())
 load_skill("double")
 print("double", double(21))
+save_skill("empty-desc", "N = 1\\n", "")
+print("empty", list_skills())
 save_skill("scan-token", "TOKEN = 'SEAM'\\n", "hyphenated package")
 load_skill("scan-token")
 print("token", TOKEN)
@@ -136,6 +138,10 @@ const skillMd = readFileSync(join(home, "skills", "double", "SKILL.md"), "utf8")
 if (!skillMd.includes("name: double")) fail(`SKILL.md ${skillMd}`);
 const initPy = readFileSync(join(home, "rlm-skills", "double", "__init__.py"), "utf8");
 if (!initPy.includes("def double")) fail(`__init__.py ${initPy}`);
+const emptyMd = readFileSync(join(home, "rlm-skills", "empty-desc", "SKILL.md"), "utf8");
+if (emptyMd.includes('description: ""') || !emptyMd.includes("RLM skill empty-desc")) {
+  fail(`empty description should default, got ${emptyMd}`);
+}
 
 provided.setHaystack(parent.id, "haystack-needle-haystack");
 const r3 = await provided.run({

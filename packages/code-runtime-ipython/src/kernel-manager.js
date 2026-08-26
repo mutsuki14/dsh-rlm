@@ -79,18 +79,36 @@ var KernelManager = class {
     await this.rpc("inject", { values });
   }
   async shutdown() {
+    let cap;
     try {
       await Promise.race([
         this.rpc("shutdown"),
-        new Promise((r) => setTimeout(r, 500))
+        new Promise((r) => {
+          cap = setTimeout(r, 500);
+        }),
       ]);
     } catch {
+    } finally {
+      if (cap) clearTimeout(cap);
     }
     const proc = this.proc;
     this.proc = null;
     if (proc) {
-      proc.stdin?.end();
-      proc.kill("SIGTERM");
+      try {
+        proc.stdin?.end();
+      } catch {
+      }
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+      }
+      const killer = setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+        }
+      }, 1000);
+      killer.unref?.();
     }
   }
   attach(bin, args, root) {

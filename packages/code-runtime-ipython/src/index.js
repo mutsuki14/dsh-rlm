@@ -427,7 +427,8 @@ class IPythonCodeRuntime {
         .catch(() => {});
     };
     attachIdle();
-    setTimeout(attachIdle, 25);
+    const later = setTimeout(attachIdle, 25);
+    later.unref?.();
   }
 
   bumpFollowup(id) {
@@ -578,13 +579,13 @@ class IPythonCodeRuntime {
 
       if (running && typeof childAgent.whenIdle === "function") {
         const remain = Math.max(1000, deadline - Date.now());
+        const idleWait = rejectAfter(remain, "idle-timeout");
         try {
-          await Promise.race([
-            childAgent.whenIdle(),
-            new Promise((_, rej) => setTimeout(() => rej(new Error("idle-timeout")), remain)),
-          ]);
+          await Promise.race([childAgent.whenIdle(), idleWait.promise]);
         } catch {
           /* fall through to snapshot / overall timeout */
+        } finally {
+          idleWait.clear();
         }
         last = this.readChildSnapshot(id);
         if (last.text && (seen === 0 ? last.count > 0 : last.count > seen)) return commit(last);
@@ -605,10 +606,12 @@ class IPythonCodeRuntime {
       if (meta.settled && (meta.lastText || last.text)) {
         return commit(last.text ? last : { text: meta.lastText, count: 1, parts: [meta.lastText] });
       }
-      await Promise.race([
-        meta.settlePromise || new Promise((r) => setTimeout(r, 250)),
-        new Promise((r) => setTimeout(r, 250)),
-      ]);
+      const tick = delay(250);
+      try {
+        await Promise.race([meta.settlePromise || tick.promise, tick.promise]);
+      } finally {
+        tick.clear();
+      }
     }
 
     last = this.readChildSnapshot(id);
@@ -761,7 +764,9 @@ class IPythonCodeRuntime {
     const kebab = this.kebabName(params.name);
     const mod = this.pyModule(kebab);
     const code = String(params.code ?? "");
-    const description = String(params.description ?? `RLM skill ${kebab}`).replace(/\s+/g, " ").slice(0, 240);
+    const description = (String(params.description ?? "").trim() || `RLM skill ${kebab}`)
+      .replace(/\s+/g, " ")
+      .slice(0, 240);
     const pkgDir = join(this.skillDir(), kebab);
     mkdirSync(pkgDir, { recursive: true });
     const initPath = join(pkgDir, "__init__.py");
@@ -922,6 +927,8 @@ Load from the RLM kernel with \`load_skill("${kebab}")\`. Implementation is \`__
   }
 
   async dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
     for (const ac of this.aborts.values()) {
       try {
         ac.abort("runtime dispose");
@@ -935,6 +942,34 @@ Load from the RLM kernel with \`load_skill("${kebab}")\`. Implementation is \`__
     await Promise.all([...this.kernels.values()].map((k) => k.shutdown()));
     this.kernels.clear();
   }
+}
+
+function delay(ms) {
+  let t;
+  const promise = new Promise((resolve) => {
+    t = setTimeout(resolve, ms);
+  });
+  return {
+    promise,
+    clear() {
+      if (t) clearTimeout(t);
+      t = undefined;
+    },
+  };
+}
+
+function rejectAfter(ms, label) {
+  let t;
+  const promise = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error(label)), ms);
+  });
+  return {
+    promise,
+    clear() {
+      if (t) clearTimeout(t);
+      t = undefined;
+    },
+  };
 }
 
 function isRetryableContinuable(err) {

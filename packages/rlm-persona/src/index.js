@@ -8,7 +8,8 @@ Invariants:
   await handle.message("..."); await handle.wait().
   await rlm.list_subagents() recovers continuable children after compaction.
 - %%bash / %%pwsh as a cell (or after Python in the same cell). await tools.bash("ls")
-  is rewritten to pwsh on Windows. Path("file").read_text() re-enters tools/execute.
+- Path("file").read_text() / .write_text() re-enter tools/execute. stdlib pathlib.Path
+  is patched to the same host-backed Path; do not open() files for writes.
 - load_haystack() / save_skill(name, code, description=...) / load_skill(name).
   Skills are kebab-case packages with SKILL.md + __init__.py.
 - Call tools as await tools.name(args) only when the host binding exists.
