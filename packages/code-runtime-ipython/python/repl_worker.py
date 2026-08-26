@@ -18,6 +18,7 @@ import inspect
 import io
 import json
 import sys
+import threading
 import traceback
 from typing import Any
 
@@ -30,6 +31,7 @@ from rlm_shim import snapshot as shim_snapshot
 
 NS: dict[str, Any] = {"__name__": "__main__"}
 _REAL_STDOUT = sys.stdout
+_HOST_LOCK = threading.Lock()
 
 
 def _dump(value: Any) -> Any:
@@ -42,17 +44,18 @@ def _dump(value: Any) -> Any:
 
 def _host_request(method: str, params: dict[str, Any]) -> Any:
     req_id = f"h{id(params)}-{method}"
-    _REAL_STDOUT.write(
-        json.dumps({"type": "host", "id": req_id, "method": method, "params": params}) + "\n"
-    )
-    _REAL_STDOUT.flush()
-    line = sys.stdin.readline()
-    if not line:
-        raise RuntimeError("host closed")
-    msg = json.loads(line)
-    if msg.get("error"):
-        raise RuntimeError(msg["error"])
-    return msg.get("result")
+    with _HOST_LOCK:
+        _REAL_STDOUT.write(
+            json.dumps({"type": "host", "id": req_id, "method": method, "params": params}) + "\n"
+        )
+        _REAL_STDOUT.flush()
+        line = sys.stdin.readline()
+        if not line:
+            raise RuntimeError("host closed")
+        msg = json.loads(line)
+        if msg.get("error"):
+            raise RuntimeError(msg["error"])
+        return msg.get("result")
 
 
 shim_host.set_transport(_host_request)

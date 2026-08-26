@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { KernelManager } from "./kernel-manager.js";
@@ -11,7 +11,7 @@ class IPythonCodeRuntime {
   isolation = "process";
   kernels = new Map();
   skills = new Map();
-  runs = new Map();
+  children = new Map();
   aborts = new Map();
   depthBySession = new Map();
   haystackBySession = new Map();
@@ -20,16 +20,42 @@ class IPythonCodeRuntime {
   lastBindings = [];
   lastSignal = undefined;
   maxDepth = 2;
+  waitTimeoutMs = 180000;
+  sessionState = new Map();
+  activeKernel = null;
 
   constructor(ctx, host, options = {}) {
     this.ctx = ctx;
     this.host = host;
     if (Number.isFinite(options.maxDepth)) this.maxDepth = Math.max(0, options.maxDepth);
+    if (Number.isFinite(options.waitTimeoutMs)) this.waitTimeoutMs = Math.max(1000, options.waitTimeoutMs);
   }
 
   sessionId() {
-    const parent = this.lastParent;
-    return parent?.id ?? parent?.session?.id ?? this.ctx.get("agentSessionId") ?? "default";
+    if (this.activeKernel) return this.activeKernel;
+    const parent = this.lastParent || this.resolveParent();
+    return parent?.session?.id ?? parent?.id ?? this.ctx.get("agentSessionId") ?? "default";
+  }
+
+  currentState() {
+    const id =
+      this.activeKernel || this.lastParent?.session?.id || this.lastParent?.id || this.ctx.get("agentSessionId");
+    if (id && this.sessionState.has(id)) return this.sessionState.get(id);
+    return null;
+  }
+
+  currentParent() {
+    return this.currentState()?.parent || this.lastParent || this.resolveParent();
+  }
+
+  currentBindings() {
+    return this.currentState()?.bindings || this.lastBindings || [];
+  }
+
+  currentSignal() {
+    const s = this.currentState()?.signal || this.lastSignal;
+    if (s && !s.aborted) return s;
+    return new AbortController().signal;
   }
 
   remainingDepth() {
@@ -49,10 +75,24 @@ class IPythonCodeRuntime {
     );
   }
 
-  setHaystack(sessionId, text) {
+  emit(kind, detail) {
+    const payload = typeof detail === "string" ? { detail } : (detail ?? {});
+    try {
+      this.ctx.sessions?.append?.({ type: kind, sessionId: this.sessionId(), ...payload });
+    } catch {
+      /* log-only */
+    }
+    try {
+      this.ctx.emit?.(kind, payload);
+    } catch {
+      /* optional */
+    }
+  }
+
+  setHaystack(sessionId, text, { rebind = false } = {}) {
     const id = String(sessionId || "default");
     this.haystackBySession.set(id, String(text ?? ""));
-    this.contextInjected.delete(id);
+    if (rebind) this.contextInjected.delete(id);
   }
 
   resolveHaystack(sessionId) {
@@ -63,79 +103,69 @@ class IPythonCodeRuntime {
     return "";
   }
 
-  skillDir() {
-    const home = process.env.DSH_HOME || join(homedir(), ".dsh");
-    return join(home, "rlm-skills");
+  dshHome() {
+    return process.env.DSH_HOME || join(homedir(), ".dsh");
   }
 
-  skillPath(name) {
-    const safe = String(name).replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 64);
-    if (!safe) throw new Error("invalid skill name");
-    return { safe, path: join(this.skillDir(), `${safe}.py`) };
+  skillDir() {
+    return join(this.dshHome(), "rlm-skills");
+  }
+
+  dshSkillRoot() {
+    return join(this.dshHome(), "skills");
+  }
+
+  kebabName(name) {
+    const safe = String(name)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 64);
+    if (!safe) throw new Error("invalid skill name (need kebab-case)");
+    return safe;
+  }
+
+  pyModule(kebab) {
+    return kebab.replace(/-/g, "_");
   }
 
   hostHandler() {
     if (this.host) return this.host;
-    return async (method, params) => {
-      if (method === "rlm.run") {
-        return this.spawnChild(params);
+    return (method, params) => this.hostMethods(method, params);
+  }
+
+  async dispatchHost(sessionId, method, params) {
+    const prev = this.activeKernel;
+    this.activeKernel = sessionId;
+    try {
+      return await this.hostMethods(method, params);
+    } finally {
+      this.activeKernel = prev;
+    }
+  }
+
+  async hostMethods(method, params) {
+      if (method === "rlm.run") return this.spawnChild(params);
+      if (method === "rlm.wait") return this.waitChild(String(params.rlm_child_id));
+      if (method === "rlm.followup") {
+        return this.followupChild(String(params.rlm_child_id), String(params.message ?? params.text ?? ""));
       }
-      if (method === "rlm.wait") {
-        return this.waitChild(String(params.rlm_child_id));
-      }
-      if (method === "rlm.list_subagents") {
-        const rows = await this.ctx.subagents.listChildren(this.sessionId());
-        return Array.isArray(rows) ? rows : [];
-      }
-      if (method === "rlm.delete_subagent") {
-        const id = String(params.rlm_child_id);
-        const run = this.runs.get(id);
-        if (run?.dispose) await run.dispose();
-        this.runs.delete(id);
-        const ac = this.aborts.get(id);
-        this.aborts.delete(id);
-        try { ac?.abort?.("rlm.delete"); } catch { /* ignore */ }
-        return null;
-      }
-      if (method === "rlm.load_haystack") {
-        return this.resolveHaystack(this.sessionId());
-      }
+      if (method === "rlm.interrupt") return this.interruptChild(String(params.rlm_child_id));
+      if (method === "rlm.list_subagents") return this.listChildrenProjected();
+      if (method === "rlm.delete_subagent") return this.deleteChild(String(params.rlm_child_id));
+      if (method === "rlm.load_haystack") return this.resolveHaystack(this.sessionId());
       if (method === "rlm.set_haystack") {
-        this.setHaystack(this.sessionId(), params.text ?? params.haystack ?? "");
+        this.setHaystack(this.sessionId(), params.text ?? params.haystack ?? "", { rebind: true });
         return true;
       }
-      if (method === "rlm.save_skill") {
-        const { safe, path } = this.skillPath(params.name);
-        mkdirSync(this.skillDir(), { recursive: true });
-        const code = String(params.code ?? "");
-        writeFileSync(path, code, "utf8");
-        this.skills.set(safe, code);
-        return safe;
-      }
-      if (method === "rlm.load_skill") {
-        const { safe, path } = this.skillPath(params.name);
-        if (this.skills.has(safe)) return this.skills.get(safe);
-        try {
-          const code = readFileSync(path, "utf8");
-          this.skills.set(safe, code);
-          return code;
-        } catch {
-          throw new Error(`harness missing skill ${safe}`);
-        }
-      }
-      if (method === "rlm.list_skills") {
-        let disk = [];
-        try {
-          disk = readdirSync(this.skillDir())
-            .filter((f) => f.endsWith(".py"))
-            .map((f) => f.slice(0, -3));
-        } catch {
-          disk = [];
-        }
-        return [...new Set([...this.skills.keys(), ...disk])];
-      }
+      if (method === "rlm.save_skill") return this.saveSkillPackage(params);
+      if (method === "rlm.load_skill") return this.loadSkillPackage(params.name);
+      if (method === "rlm.list_skills") return this.listSkillNames();
       if (method === "tools.dispatch") {
-        const fn = this.lastBindings.find((b) => b.global === "tools")?.functions?.[params.name];
+        const bindings = this.currentBindings();
+        const ns = bindings.find((b) => b.global === (params.global ?? "tools"));
+        const fn = ns?.functions?.[params.name];
         if (typeof fn === "function") return fn(params.args);
         return this.ctx.tools.execute({
           global: params.global,
@@ -144,15 +174,14 @@ class IPythonCodeRuntime {
         });
       }
       throw new Error(`unknown host method ${method}`);
-    };
   }
 
   /**
-   * Non-blocking spawn. Prefer tools.subagent(background) so nested run_code
-   * does not deadlock under exclusive tool locks; fall back to subagents.start.
+   * Prefer continuable admission so handle.message() can follow up later.
+   * One-shot background children cannot be continued.
    */
   async spawnChild(params) {
-    const parent = this.lastParent || this.resolveParent();
+    const parent = this.currentParent();
     if (!parent) {
       const listed = this.ctx.agents?.list?.()?.length ?? 0;
       throw new Error(
@@ -164,152 +193,440 @@ class IPythonCodeRuntime {
     if (remaining <= 0) {
       throw new Error(`rlm(): max recursion depth (${this.maxDepth})`);
     }
-    const childPrompt = String(params.prompt ?? "");
-    const tools = this.lastBindings.find((b) => b.global === "tools")?.functions;
-    const spawnFn = tools?.subagent || tools?.subagent_fork;
+    const childPrompt = String(params.prompt ?? "").trim();
+    if (!childPrompt) throw new Error("rlm(): empty prompt");
+    const label = params.name ?? "rlm";
+    this.emit("rlm/spawn", { name: label, depth: remaining });
 
-    // Path A: Code Mode binding, background — returns immediately, enables parallel.
+    if (typeof this.ctx.subagents?.startContinuable === "function") {
+      const ac = new AbortController();
+      const providers = [...new Set([params.provider, "spawn", "spawn-in-process"].filter(Boolean))];
+      let lastErr;
+      for (const provider of providers) {
+        try {
+          const out = await this.ctx.subagents.startContinuable({
+            provider,
+            label,
+            request: {
+              prompt: asBlocks(childPrompt),
+              parent,
+              maxDepth: remaining,
+            },
+            signal: ac.signal,
+          });
+          const id = String(out.childId ?? out.id ?? out.rlm_child_id);
+          this.aborts.set(id, ac);
+          this.trackChild(id, {
+            name: params.name ?? id,
+            mode: "continuable",
+            depth: remaining - 1,
+            sessionDir: out.sessionDir ?? out.session_dir ?? "",
+            model: out.model ?? "",
+          });
+          return {
+            rlm_child_id: id,
+            name: params.name ?? id,
+            session_dir: out.sessionDir ?? out.session_dir ?? "",
+            model: out.model ?? "",
+            status: "running",
+            mode: "continuable",
+          };
+        } catch (err) {
+          lastErr = err;
+          if (!isRetryableContinuable(err)) throw err;
+        }
+      }
+      if (!this.currentBindings().find((b) => b.global === "tools")?.functions?.subagent && typeof this.ctx.subagents?.start !== "function") {
+        throw lastErr;
+      }
+    }
+
+    const tools = this.currentBindings().find((b) => b.global === "tools")?.functions;
+    const spawnFn = tools?.subagent || tools?.subagent_fork;
     if (typeof spawnFn === "function") {
       const out = await spawnFn({
-        description: params.name ?? "rlm",
+        description: label,
         prompt: childPrompt,
         run_in_background: true,
+        backgroundMode: "continuable",
       });
       const id = childIdFrom(out) ?? `rlm-${Date.now()}`;
-      this.trackContinuable(id, remaining - 1);
+      this.trackChild(id, {
+        name: params.name ?? id,
+        mode: "continuable",
+        depth: remaining - 1,
+      });
       return {
         rlm_child_id: id,
         name: params.name ?? id,
         session_dir: "",
         model: "",
         status: "running",
+        mode: "continuable",
       };
     }
 
-    // Path B: host subagents.start — SubagentRun.result is a Promise (non-blocking return).
     const ac = new AbortController();
     const run = await this.ctx.subagents.start("spawn", {
-      label: params.name ?? "rlm",
+      label,
       prompt: [{ type: "text", text: childPrompt }],
       parent,
       signal: ac.signal,
       maxDepth: remaining,
     });
-    this.runs.set(String(run.id), run);
     this.aborts.set(String(run.id), ac);
-    this.depthBySession.set(String(run.id), remaining - 1);
+    this.trackChild(String(run.id), {
+      name: params.name ?? run.id,
+      mode: "one-shot",
+      depth: remaining - 1,
+      run,
+      resultPromise: run.result,
+      sessionDir: run.localAgent?.session?.dir ?? "",
+      model: run.localAgent?.model ?? "",
+    });
     return {
       rlm_child_id: run.id,
       name: params.name ?? run.id,
       session_dir: run.localAgent?.session?.dir ?? "",
       model: run.localAgent?.model ?? "",
       status: "running",
+      mode: "one-shot",
     };
   }
 
-  trackContinuable(id, childDepth) {
+  trackChild(id, extra) {
     const key = String(id);
-    this.depthBySession.set(key, childDepth);
-    let settle;
-    const result = new Promise((resolve) => {
-      settle = resolve;
+    this.depthBySession.set(key, extra.depth);
+    this.children.set(key, {
+      id: key,
+      name: extra.name ?? key,
+      mode: extra.mode ?? "continuable",
+      status: "running",
+      lastText: null,
+      assistantCount: 0,
+      run: extra.run,
+      resultPromise: extra.resultPromise,
+      consumed: false,
+      awaitingFollowup: false,
+      sessionDir: extra.sessionDir ?? "",
+      model: extra.model ?? "",
     });
-    this.runs.set(key, { kind: "continuable", id: key, result });
-    // Background poller fills result so wait() can share one path.
-    (async () => {
-      try {
-        const text = await this.waitContinuable(key);
-        settle({ output: text, stopReason: "completed" });
-      } catch (err) {
-        settle({
-          output: null,
-          stopReason: "error",
-          diagnostic: err instanceof Error ? err.message : String(err),
-        });
-      }
-    })();
+  }
+
+  bumpFollowup(id) {
+    const meta = this.children.get(String(id));
+    if (meta) {
+      meta.status = "running";
+      meta.consumed = true;
+      meta.awaitingFollowup = true;
+    }
+  }
+
+  async followupChild(id, message) {
+    if (!message) throw new Error("rlm.message(): empty message");
+    const meta = this.children.get(String(id));
+    if (meta?.mode === "one-shot") {
+      throw new Error("rlm.message(): child is one-shot (need startContinuable)");
+    }
+    const parent = this.currentParent();
+    const tools = this.currentBindings().find((b) => b.global === "tools")?.functions;
+    const send = tools?.send_message;
+    let messageId = null;
+    if (typeof send === "function") {
+      const out = await send({ subagent_id: id, message });
+      messageId = out?.messageId ?? out?.id ?? null;
+    } else if (typeof this.ctx.subagents?.followup === "function") {
+      if (!parent) throw new Error("rlm.message(): no live parent agent");
+      const senderSessionId = parent.session?.id ?? parent.id;
+      messageId = await this.ctx.subagents.followup(parent, id, asBlocks(message), {
+        source: { kind: "coordinator", form: "relay", senderSessionId },
+        signal: this.currentSignal(),
+      });
+    } else {
+      throw new Error(
+        "rlm.message(): no continuable followup (need ctx.subagents.followup or tools.send_message)",
+      );
+    }
+    this.bumpFollowup(id);
+    this.emit("rlm/followup", { id, messageId });
+    return { messageId, status: "running" };
+  }
+
+  async interruptChild(id) {
+    const tools = this.currentBindings().find((b) => b.global === "tools")?.functions;
+    if (typeof tools?.interrupt_agent === "function") {
+      await tools.interrupt_agent({ agent_id: id });
+      return true;
+    }
+    if (typeof this.ctx.subagents?.interrupt === "function") {
+      const parent = this.currentParent();
+      await this.ctx.subagents.interrupt(id, { kind: "ancestor", agent: parent });
+      return true;
+    }
+    const ac = this.aborts.get(String(id));
+    try {
+      ac?.abort?.("rlm.interrupt");
+    } catch {
+      /* ignore */
+    }
+    return true;
   }
 
   async waitChild(id) {
-    const run = this.runs.get(id);
-    if (run?.result) {
-      const settled = await run.result;
+    const meta = this.children.get(id);
+    if (meta && meta.status === "done" && meta.lastText != null && !meta.awaitingFollowup) {
+      return { result: meta.lastText, status: "done" };
+    }
+    if (meta?.resultPromise && !meta.consumed) {
+      const settled = await meta.resultPromise;
+      meta.consumed = true;
       let folded = foldSubagentOutput(settled);
-      if ((folded == null || folded === "") && !(settled?.stopReason && settled.stopReason !== "running")) {
+      if (
+        (folded == null || folded === "") &&
+        !(settled?.stopReason && settled.stopReason !== "running")
+      ) {
         folded = await this.waitContinuable(id);
+      } else if (folded) {
+        meta.lastText = folded;
+        meta.awaitingFollowup = false;
+        const snap = this.readChildSnapshot(id);
+        if (snap.count) meta.assistantCount = snap.count;
       }
-      await disposeRun(run);
-      this.runs.delete(id);
-      const ac = this.aborts.get(id);
-      this.aborts.delete(id);
-      try { ac?.abort?.("rlm.wait settled"); } catch { /* ignore */ }
+      meta.status = settled?.stopReason === "error" ? "error" : "done";
+      this.emit("rlm/wait", { id, status: meta.status });
+      if (meta.mode === "one-shot") {
+        await disposeRun(meta.run);
+        const ac = this.aborts.get(id);
+        this.aborts.delete(id);
+        try {
+          ac?.abort?.("rlm.wait settled");
+        } catch {
+          /* ignore */
+        }
+      }
       return {
         result: folded ?? null,
-        status: settled?.stopReason ?? "done",
+        status: meta.status === "error" ? "error" : "done",
         diagnostic: settled?.diagnostic ?? null,
       };
     }
     const result = await this.waitContinuable(id);
+    this.emit("rlm/wait", { id, status: "done" });
     return { result, status: "done" };
   }
 
   async waitContinuable(id) {
-    const deadline = Date.now() + 180000;
-    let last = null;
+    const meta = this.children.get(id) || { lastText: null, assistantCount: 0, status: "running" };
+    const seen = meta.assistantCount || 0;
+    const deadline = Date.now() + this.waitTimeoutMs;
+    let last = this.readChildSnapshot(id);
+    let stable = null;
+    let stableHits = 0;
     while (Date.now() < deadline) {
-      last = this.readChildOutput(id);
-      if (last != null && last !== "") return last;
-
-      // Activity probe: if child listed as idle/done and we still have nothing, keep polling briefly.
-      try {
-        const rows = await this.ctx.subagents.listChildren(this.sessionId());
-        const row = Array.isArray(rows)
-          ? rows.find((r) => String(r.id ?? r.childId ?? r.subagentId) === id)
-          : undefined;
-        if (row) {
-          const act = String(row.activity ?? row.status ?? "").toLowerCase();
-          if ((act === "done" || act === "completed" || act === "idle") && last) {
-            return last;
-          }
+      last = this.readChildSnapshot(id);
+      const newer = Boolean(last.text) && (seen === 0 ? last.count > 0 : last.count > seen);
+      if (newer) {
+        if (last.text === stable) stableHits += 1;
+        else {
+          stable = last.text;
+          stableHits = 1;
         }
-      } catch {
-        /* listChildren optional */
+        const act = await this.childActivity(id);
+        const idle = ["done", "completed", "idle", "waiting", "ready"].includes(act);
+        if (idle || stableHits >= 2) {
+          meta.lastText = last.text;
+          meta.assistantCount = last.count;
+          meta.status = "done";
+          meta.awaitingFollowup = false;
+          if (!this.children.has(id)) {
+            this.children.set(id, { ...meta, id, name: meta.name ?? id, mode: meta.mode ?? "continuable" });
+          }
+          return last.text;
+        }
       }
       await new Promise((r) => setTimeout(r, 400));
     }
-    if (last != null && last !== "") return last;
+    if (last?.text && last.count > seen) return last.text;
     throw new Error(`rlm.wait: timed out waiting for ${id}`);
   }
 
-  readChildOutput(id) {
-    const session =
-      this.ctx.sessions?.get?.(id) ||
-      this.ctx.sessions?.get?.(String(id));
-    if (!session) return null;
+  async childActivity(id) {
+    try {
+      const rows = await this.ctx.subagents?.listChildren?.(this.sessionId());
+      const row = Array.isArray(rows)
+        ? rows.find((r) => String(r.id ?? r.childId ?? r.subagentId) === String(id))
+        : undefined;
+      return String(row?.activity ?? row?.status ?? "").toLowerCase();
+    } catch {
+      return "";
+    }
+  }
+
+  readChildSnapshot(id) {
+    const session = this.ctx.sessions?.get?.(id) || this.ctx.sessions?.get?.(String(id));
+    if (!session) return { text: null, count: 0 };
     let messages = [];
     try {
       messages = session.deriveMessages?.() ?? session.messages ?? [];
     } catch {
       messages = [];
     }
-    if (!Array.isArray(messages)) return null;
+    if (!Array.isArray(messages)) return { text: null, count: 0 };
     const assistants = messages.filter(
       (m) => m?.role === "assistant" || m?.kind === "assistant" || m?.type === "assistant",
     );
     const last = assistants.at(-1);
-    if (!last) return null;
+    if (!last) return { text: null, count: 0 };
     const content = last.content ?? last.text ?? last.message;
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) return outputValueText(content);
-    return content != null ? String(content) : null;
+    let text = null;
+    if (typeof content === "string") text = content;
+    else if (Array.isArray(content)) text = outputValueText(content);
+    else if (content != null) text = String(content);
+    if (typeof text === "string" && /^started subagent/i.test(text.trim())) text = null;
+    return { text, count: assistants.length };
+  }
+
+  async listChildrenProjected() {
+    const live = [];
+    try {
+      const rows = await this.ctx.subagents?.listChildren?.(this.sessionId());
+      if (Array.isArray(rows)) live.push(...rows);
+    } catch {
+      /* optional */
+    }
+    const byId = new Map();
+    for (const row of live) {
+      const id = String(row.id ?? row.childId ?? row.subagentId ?? "");
+      if (!id) continue;
+      const mode = row.mode ?? "continuable";
+      if (mode !== "continuable") continue;
+      byId.set(id, {
+        rlm_child_id: id,
+        name: row.label ?? row.name ?? id,
+        status: row.activity ?? row.status ?? "idle",
+        mode: "continuable",
+        session_dir: row.sessionDir ?? "",
+        model: row.model ?? "",
+        result: this.children.get(id)?.lastText ?? null,
+      });
+    }
+    for (const [id, meta] of this.children) {
+      if (meta.mode === "one-shot") continue;
+      if (!byId.has(id)) {
+        byId.set(id, {
+          rlm_child_id: id,
+          name: meta.name,
+          status: meta.status,
+          mode: meta.mode,
+          session_dir: meta.sessionDir ?? "",
+          model: meta.model ?? "",
+          result: meta.lastText,
+        });
+      }
+    }
+    return [...byId.values()];
+  }
+
+  async deleteChild(id) {
+    try {
+      await this.interruptChild(id);
+    } catch {
+      /* best-effort */
+    }
+    const meta = this.children.get(id);
+    if (meta?.run?.dispose) await meta.run.dispose().catch(() => undefined);
+    this.children.delete(id);
+    const ac = this.aborts.get(id);
+    this.aborts.delete(id);
+    try {
+      ac?.abort?.("rlm.delete");
+    } catch {
+      /* ignore */
+    }
+    return null;
+  }
+
+  saveSkillPackage(params) {
+    const kebab = this.kebabName(params.name);
+    const mod = this.pyModule(kebab);
+    const code = String(params.code ?? "");
+    const description = String(params.description ?? `RLM skill ${kebab}`).replace(/\s+/g, " ").slice(0, 240);
+    const pkgDir = join(this.skillDir(), kebab);
+    mkdirSync(pkgDir, { recursive: true });
+    const initPath = join(pkgDir, "__init__.py");
+    writeFileSync(initPath, code.endsWith("\n") ? code : `${code}\n`, "utf8");
+    const skillMd = `---
+name: ${kebab}
+description: ${JSON.stringify(description)}
+---
+# ${kebab}
+
+Load from the RLM kernel with \`load_skill("${kebab}")\`. Implementation is \`__init__.py\`.
+`;
+    writeFileSync(join(pkgDir, "SKILL.md"), skillMd, "utf8");
+    const dshDir = join(this.dshSkillRoot(), kebab);
+    mkdirSync(dshDir, { recursive: true });
+    writeFileSync(join(dshDir, "SKILL.md"), skillMd, "utf8");
+    this.skills.set(kebab, code);
+    this.emit("rlm/skill-save", { name: kebab });
+    return { name: kebab, module: mod, root: this.skillDir(), init: initPath };
+  }
+
+  loadSkillPackage(name) {
+    const kebab = this.kebabName(name);
+    const mod = this.pyModule(kebab);
+    const pkgInit = join(this.skillDir(), kebab, "__init__.py");
+    const flat = join(this.skillDir(), `${kebab}.py`);
+    const snakeFlat = join(this.skillDir(), `${mod}.py`);
+    for (const path of [pkgInit, flat, snakeFlat]) {
+      try {
+        const code = readFileSync(path, "utf8");
+        this.skills.set(kebab, code);
+        return { code, root: this.skillDir(), module: mod, name: kebab, init: path.endsWith("__init__.py") ? path : "" };
+      } catch {
+        /* try next */
+      }
+    }
+    if (this.skills.has(kebab)) {
+      return {
+        code: this.skills.get(kebab),
+        root: this.skillDir(),
+        module: mod,
+        name: kebab,
+        init: pkgInit,
+      };
+    }
+    throw new Error(`harness missing skill ${kebab}`);
+  }
+
+  listSkillNames() {
+    let disk = [];
+    try {
+      disk = readdirSync(this.skillDir(), { withFileTypes: true }).flatMap((ent) => {
+        if (ent.isDirectory() && (existsSync(join(this.skillDir(), ent.name, "__init__.py")) || existsSync(join(this.skillDir(), ent.name, "SKILL.md")))) {
+          return [ent.name];
+        }
+        if (ent.isFile() && ent.name.endsWith(".py")) return [ent.name.slice(0, -3)];
+        return [];
+      });
+    } catch {
+      disk = [];
+    }
+    return [...new Set([...this.skills.keys(), ...disk])];
   }
 
   async maybeInjectContext(km, sessionId) {
     if (this.contextInjected.has(sessionId)) return;
     const hay = this.resolveHaystack(sessionId);
-    if (hay === "") {
-      // Still mark injected so we don't spam empty assigns; load_haystack can refill later.
-      return;
+    if (hay === "") return;
+    try {
+      const ns = await km.inspectNamespace();
+      if (ns && typeof ns.context === "string" && ns.context !== "") {
+        this.contextInjected.add(sessionId);
+        return;
+      }
+    } catch {
+      /* inspect optional */
     }
     try {
       await km.injectNamespace({ context: hay });
@@ -324,24 +641,43 @@ class IPythonCodeRuntime {
     }
   }
 
+  async onCompacted() {
+    const id = this.sessionId();
+    const km = this.kernels.get(id);
+    if (!km) {
+      this.emit("rlm/kernel-snapshot", { after: "compaction", vars: 0, kernel: false });
+      return;
+    }
+    const snap = await km.inspectNamespace().catch(() => ({}));
+    this.emit("rlm/kernel-snapshot", {
+      after: "compaction",
+      vars: Object.keys(snap || {}).length,
+      kernel: true,
+    });
+  }
+
   async run(request) {
     const prevParent = this.lastParent;
     const prevBindings = this.lastBindings;
     const prevSignal = this.lastSignal;
+    const prevKernel = this.activeKernel;
     try {
       this.lastParent = this.resolveParent();
       this.lastBindings = request.bindings ?? [];
       this.lastSignal = request.signal;
-      const id = this.sessionId();
-
-      // Optional per-request haystack override (host tests / future bindings).
+      const id = this.lastParent?.session?.id ?? this.lastParent?.id ?? this.ctx.get("agentSessionId") ?? "default";
+      this.sessionState.set(id, {
+        parent: this.lastParent,
+        bindings: this.lastBindings,
+        signal: this.lastSignal,
+      });
+      this.activeKernel = id;
       if (request.haystack != null || request.context != null) {
-        this.setHaystack(id, request.haystack ?? request.context);
+        this.setHaystack(id, request.haystack ?? request.context, { rebind: true });
       }
-
       let km = this.kernels.get(id);
       if (!km) {
-        km = new KernelManager(id, this.hostHandler());
+        km = new KernelManager(id, (method, params) => this.dispatchHost(id, method, params));
         try {
           await km.start();
         } catch (err) {
@@ -356,13 +692,15 @@ class IPythonCodeRuntime {
         }
         this.kernels.set(id, km);
       }
-      await km.installBindings(request.bindings);
+      const reserved = new Set(["rlm", "Path", "RLMSpawnHandle", "load_haystack", "set_haystack", "save_skill", "load_skill", "list_skills", "chunk"]);
+      await km.installBindings((request.bindings ?? []).filter((b) => !reserved.has(b.global)));
       await this.maybeInjectContext(km, id);
       return await km.execute(request.program, request.signal);
     } finally {
       this.lastParent = prevParent;
       this.lastBindings = prevBindings;
       this.lastSignal = prevSignal;
+      this.activeKernel = prevKernel;
     }
   }
 
@@ -374,12 +712,30 @@ class IPythonCodeRuntime {
 
   async dispose() {
     for (const ac of this.aborts.values()) {
-      try { ac.abort("runtime dispose"); } catch { /* ignore */ }
+      try {
+        ac.abort("runtime dispose");
+      } catch {
+        /* ignore */
+      }
     }
     this.aborts.clear();
+    this.sessionState.clear();
+    this.children.clear();
     await Promise.all([...this.kernels.values()].map((k) => k.shutdown()));
     this.kernels.clear();
   }
+}
+
+function isRetryableContinuable(err) {
+  const m = String(err?.message ?? err ?? "").toLowerCase();
+  return /preparecontinuable|unknown provider|not continuable|no continuation|provider .* not|continuable unavailable/.test(
+    m,
+  );
+}
+
+function asBlocks(text) {
+  if (Array.isArray(text)) return text;
+  return [{ type: "text", text: String(text ?? "") }];
 }
 
 function disposeRun(run) {
@@ -477,22 +833,14 @@ function extractUserText(ev) {
 }
 
 function hookHaystackEvents(ctx, runtime) {
-  const names = [
-    "turn/start",
-    "agent/turn-start",
-    "session/user-message",
-    "user/message",
-  ];
+  const names = ["turn/start", "agent/turn-start", "session/user-message", "user/message"];
   for (const name of names) {
     try {
       ctx.on(name, async (ev, next) => {
         try {
           const text = extractUserText(ev);
           const sid =
-            ev?.sessionId ??
-            ev?.session?.id ??
-            ctx.get("agentSessionId") ??
-            runtime.sessionId();
+            ev?.sessionId ?? ev?.session?.id ?? ctx.get("agentSessionId") ?? runtime.sessionId();
           if (text && sid) runtime.setHaystack(String(sid), text);
         } catch {
           /* never block the turn */
@@ -500,7 +848,24 @@ function hookHaystackEvents(ctx, runtime) {
         return typeof next === "function" ? next() : undefined;
       });
     } catch {
-      /* event may not exist on this DSH build */
+      /* event may not exist */
+    }
+  }
+}
+
+function hookCompaction(ctx, runtime) {
+  for (const name of ["compaction/end", "compaction/start"]) {
+    try {
+      ctx.on(name, async (ev, next) => {
+        try {
+          if (name === "compaction/end") await runtime.onCompacted(ev);
+        } catch {
+          /* never fail compaction */
+        }
+        return typeof next === "function" ? next() : undefined;
+      });
+    } catch {
+      /* optional seam */
     }
   }
 }
@@ -512,4 +877,5 @@ export function apply(ctx, config = {}) {
   ctx.provide("codeRuntime", runtime);
   ctx.on("dispose", () => runtime.dispose());
   hookHaystackEvents(ctx, runtime);
+  hookCompaction(ctx, runtime);
 }

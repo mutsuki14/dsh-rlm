@@ -1,7 +1,10 @@
 """Model-facing RLM shim. No agent loop, no provider calls."""
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
+import sys
 from dataclasses import dataclass, fields
 from typing import Any
 
@@ -23,6 +26,7 @@ class RLMSpawnHandle:
     model: str = ""
     status: str = "running"
     result: Any = None
+    mode: str = "continuable"
 
     async def wait(self) -> Any:
         payload = await host_request("rlm.wait", {"rlm_child_id": self.rlm_child_id})
@@ -33,6 +37,17 @@ class RLMSpawnHandle:
             self.status = "done"
             self.result = payload
         return self.result
+
+    async def message(self, text: str) -> "RLMSpawnHandle":
+        await host_request(
+            "rlm.followup",
+            {"rlm_child_id": self.rlm_child_id, "message": str(text)},
+        )
+        self.status = "running"
+        return self
+
+    async def interrupt(self) -> None:
+        await host_request("rlm.interrupt", {"rlm_child_id": self.rlm_child_id})
 
 
 def _ns(ns: dict[str, Any] | None) -> dict[str, Any]:
@@ -128,8 +143,11 @@ def set_haystack(text: str) -> None:
     host_request_sync("rlm.set_haystack", {"text": str(text)})
 
 
-def save_skill(name: str, code: str) -> None:
-    host_request_sync("rlm.save_skill", {"name": name, "code": code})
+def save_skill(name: str, code: str, description: str | None = None) -> None:
+    host_request_sync(
+        "rlm.save_skill",
+        {"name": name, "code": code, "description": description or ""},
+    )
 
 
 def chunk(s: Any, n: int) -> list[str]:
@@ -142,10 +160,50 @@ def install(ns: dict[str, Any] | None = None) -> None:
     target = _ns(ns)
 
     def load_skill(name: str) -> str:
-        code = host_request_sync("rlm.load_skill", {"name": name}) or ""
-        if not code:
+        payload = host_request_sync("rlm.load_skill", {"name": name}) or ""
+        code = ""
+        root = ""
+        module = ""
+        init = ""
+        if isinstance(payload, dict):
+            code = str(payload.get("code") or "")
+            root = str(payload.get("root") or "")
+            module = str(payload.get("module") or "")
+            init = str(payload.get("init") or "")
+        else:
+            code = str(payload)
+        if not code and not init and not root:
             raise RuntimeError(f"harness 里没有 {name}")
-        exec(compile(code, f"<skill:{name}>", "exec"), target)
+        if root and root not in sys.path:
+            sys.path.insert(0, root)
+        loaded = False
+        if init:
+            try:
+                spec = importlib.util.spec_from_file_location(module or name.replace("-", "_"), init)
+                if spec and spec.loader:
+                    sys.modules.pop(spec.name, None)
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    for k, v in vars(mod).items():
+                        if k.startswith("_"):
+                            continue
+                        target[k] = v
+                    loaded = True
+            except Exception:
+                loaded = False
+        if not loaded and module:
+            try:
+                sys.modules.pop(module, None)
+                mod = importlib.import_module(module)
+                for k, v in vars(mod).items():
+                    if k.startswith("_"):
+                        continue
+                    target[k] = v
+                loaded = True
+            except Exception:
+                loaded = False
+        if not loaded and code:
+            exec(compile(code, f"<skill:{name}>", "exec"), target)
         return code
 
     def list_skills() -> list[str]:
@@ -170,9 +228,23 @@ def install(ns: dict[str, Any] | None = None) -> None:
 def bind(spec_json: Any, ns: dict[str, Any] | None = None) -> None:
     spec = json.loads(spec_json) if isinstance(spec_json, str) else spec_json
     target = _ns(ns)
+    reserved = {
+        "rlm",
+        "Path",
+        "RLMSpawnHandle",
+        "load_haystack",
+        "set_haystack",
+        "save_skill",
+        "load_skill",
+        "list_skills",
+        "chunk",
+    }
     for item in spec:
-        proxy = _ToolsProxy(item["global"], item["names"])
-        target[item["global"]] = proxy
+        global_name = item.get("global")
+        if global_name in reserved:
+            continue
+        proxy = _ToolsProxy(global_name, item["names"])
+        target[global_name] = proxy
 
 
 def snapshot(ns: dict[str, Any] | None = None) -> dict[str, str]:
@@ -223,6 +295,7 @@ def inspect(ns: dict[str, Any] | None = None) -> dict[str, Any]:
                 "name": v.name,
                 "status": v.status,
                 "result": v.result,
+                "mode": v.mode,
             }
             continue
         if callable(v) and not isinstance(v, type):
@@ -248,6 +321,7 @@ def inject(values: dict[str, Any], ns: dict[str, Any] | None = None) -> None:
                 name=str(v.get("name") or k),
                 status=str(v.get("status") or "done"),
                 result=v.get("result"),
+                mode=str(v.get("mode") or "continuable"),
             )
         elif isinstance(v, dict) and v.get("__type") == "opaque":
             continue
