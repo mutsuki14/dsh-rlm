@@ -1,4 +1,4 @@
-import { KernelManager } from "./packages/code-runtime-ipython/src/kernel-manager.ts";
+import { KernelManager } from "./packages/code-runtime-ipython/src/kernel-manager.js";
 
 const km = new KernelManager("test", async (method, params) => {
   if (method === "rlm.run") {
