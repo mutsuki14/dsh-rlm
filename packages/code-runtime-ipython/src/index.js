@@ -192,16 +192,25 @@ class IPythonCodeRuntime {
           name = ns?.functions?.pwsh ? "pwsh" : ns?.functions?.shell ? "shell" : name;
           fn = ns?.functions?.[name];
         }
-        const args = params.args && typeof params.args === "object" ? { ...params.args } : params.args ?? {};
-        if (name === "pwsh" && args && args.description == null) {
-          args.description = String(args.command ?? "shell").slice(0, 80);
-        }
+        const args = normalizeDispatchArgs(name, params.args);
         if (typeof fn === "function") return fn(args);
-        return this.ctx.tools.execute({
-          global: params.global,
-          name,
-          args,
-        });
+        try {
+          return await this.ctx.tools.execute({
+            global: params.global,
+            name,
+            args,
+          });
+        } catch (err) {
+          if (params.name === "bash" && name !== "pwsh") {
+            const pwshArgs = normalizeDispatchArgs("pwsh", params.args);
+            return this.ctx.tools.execute({
+              global: params.global,
+              name: "pwsh",
+              args: pwshArgs,
+            });
+          }
+          throw err;
+        }
       }
       throw new Error(`unknown host method ${method}`);
   }
@@ -935,6 +944,24 @@ function isRetryableContinuable(err) {
   );
 }
 
+function normalizeDispatchArgs(name, args) {
+  const shell = name === "bash" || name === "pwsh" || name === "shell";
+  if (typeof args === "string") {
+    if (shell) return { command: args, description: args.slice(0, 80) || name };
+    if (name === "read") return { file_path: args };
+    return args;
+  }
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    const out = { ...args };
+    if (shell && out.description == null) {
+      out.description = String(out.command ?? name).slice(0, 80);
+    }
+    if (shell && out.command == null && typeof out.cmd === "string") out.command = out.cmd;
+    return out;
+  }
+  return args ?? {};
+}
+
 function sanitizeText(s) {
   if (typeof s !== "string") return s;
   return Buffer.from(s, "utf8").toString("utf8");
@@ -945,7 +972,7 @@ function composeChildPrompt(user, parent) {
   const cwd = header.cwd || parent?.session?.cwd || parent?.cwd || process.cwd();
   return [
     `You are a delegated subagent. Stay inside ${cwd} unless the task names another path.`,
-    "Use native file tools (read, grep, glob, bash). Finish with a written summary and stop.",
+    "Use native file tools (read, grep, glob, bash or pwsh). Finish with a written summary and stop.",
     "Do not scan the whole disk, home directory, or prior DSH session logs.",
     "",
     user,

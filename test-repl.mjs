@@ -112,6 +112,30 @@ if (mixed.error) fail(`mixed bash: ${mixed.error.message}`);
 if (!(mixed.logs || []).join("\n").includes("py 1")) fail(`mixed py logs ${JSON.stringify(mixed.logs)}`);
 await kmHaySet.shutdown();
 
+const pwshCalls = [];
+const kmWin = new KernelManager("win-shell", async (method, params) => {
+  if (method !== "tools.dispatch") throw new Error(`unexpected ${method}`);
+  pwshCalls.push(params);
+  if (params.name === "bash") throw new Error("no bash binding");
+  if (params.name === "pwsh") {
+    if (!params.args || typeof params.args !== "object") fail(`pwsh args not object ${JSON.stringify(params.args)}`);
+    if (!params.args.description) fail(`pwsh missing description ${JSON.stringify(params.args)}`);
+    if (!params.args.command) fail(`pwsh missing command ${JSON.stringify(params.args)}`);
+    return `pwsh:${String(params.args.command).trim()}`;
+  }
+  throw new Error(`unexpected tool ${params.name}`);
+});
+await kmWin.start();
+const crlf = await kmWin.execute("print('py')\r\n%%bash\r\necho bash-ok\r\n");
+if (crlf.error) fail(`crlf bash: ${crlf.error.message}`);
+if (!(crlf.logs || []).join("\n").includes("py")) fail(`crlf py ${JSON.stringify(crlf.logs)}`);
+const alias = await kmWin.execute('await tools.bash("echo hi")');
+if (alias.error) fail(`tools.bash alias: ${alias.error.message}`);
+if (alias.value !== "pwsh:echo hi") fail(`alias value ${JSON.stringify(alias)}`);
+const magicPwsh = await kmWin.execute("%%pwsh\nGet-Date");
+if (magicPwsh.error) fail(`%%pwsh: ${magicPwsh.error.message}`);
+await kmWin.shutdown();
+
 const skillStore = new Map();
 const kmSkill = new KernelManager("skill", async (method, params) => {
   if (method === "rlm.save_skill") {

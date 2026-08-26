@@ -7,8 +7,8 @@ Invariants:
   await handle.wait() fills handle.result. Follow up the same child with
   await handle.message("..."); await handle.wait().
   await rlm.list_subagents() recovers continuable children after compaction.
-- Path("file").read_text() / .write_text() re-enter tools/execute. No open().
-- %%bash as a whole cell, or await tools.bash("ls"). Allowlisted on the host.
+- %%bash / %%pwsh as a cell (or after Python in the same cell). await tools.bash("ls")
+  is rewritten to pwsh on Windows. Path("file").read_text() re-enters tools/execute.
 - load_haystack() / save_skill(name, code, description=...) / load_skill(name).
   Skills are kebab-case packages with SKILL.md + __init__.py.
 - Call tools as await tools.name(args) only when the host binding exists.
@@ -19,7 +19,7 @@ Do not paste large files into rlm() or into the next cell as literals.
 `;
 
 var CHILD_PREAMBLE = `You are a delegated subagent, not the RLM coordinator.
-Use native file tools (read, grep, glob, bash). Do not wander the whole disk.
+Use native file tools (read, grep, glob, bash or pwsh). Do not wander the whole disk.
 Stay inside the working directory unless the task names another path.
 When the review is done, write a concise final answer and stop.
 `;

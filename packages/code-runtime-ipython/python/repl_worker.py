@@ -127,26 +127,31 @@ class _TopReturn(ast.NodeTransformer):
         return ast.Expr(value=val)
 
 
-def _run_bash(script: str) -> Any:
-    args = {"command": script, "description": "%%bash"}
+_SHELL_MAGICS = {"%%bash": "bash", "%%sh": "bash", "%%pwsh": "pwsh"}
+
+
+def _run_bash(script: str, tool: str = "bash") -> Any:
+    args = {"command": script, "description": f"%{tool}"}
     try:
         return _host_request(
             "tools.dispatch",
-            {"global": "tools", "name": "bash", "args": args},
+            {"global": "tools", "name": tool, "args": args},
         )
     except RuntimeError:
+        fallback = "pwsh" if tool != "pwsh" else "bash"
         return _host_request(
             "tools.dispatch",
-            {"global": "tools", "name": "pwsh", "args": args},
+            {"global": "tools", "name": fallback, "args": args},
         )
 
 
-def _split_bash_magic(src: str) -> tuple[str, str | None]:
+def _split_bash_magic(src: str) -> tuple[str, str | None, str]:
     lines = src.splitlines(keepends=True)
     for i, line in enumerate(lines):
-        if line.strip() == "%%bash":
-            return "".join(lines[:i]), "".join(lines[i + 1 :])
-    return src, None
+        key = line.strip().lower()
+        if key in _SHELL_MAGICS:
+            return "".join(lines[:i]), "".join(lines[i + 1 :]), _SHELL_MAGICS[key]
+    return src, None, "bash"
 
 
 def _run_python(src: str) -> tuple[Any, list[str]]:
@@ -181,13 +186,13 @@ def _run_python(src: str) -> tuple[Any, list[str]]:
 
 
 def _run_cell(src: str) -> tuple[Any, list[str]]:
-    pre, bash = _split_bash_magic(src)
+    pre, bash, tool = _split_bash_magic(src)
     logs: list[str] = []
     value: Any = None
     if pre.strip():
         value, logs = _run_python(pre)
     if bash is not None:
-        raw = _run_bash(bash)
+        raw = _run_bash(bash, tool)
         text = "" if raw is None else str(raw)
         if text:
             logs = [*logs, _clean_str(text)]

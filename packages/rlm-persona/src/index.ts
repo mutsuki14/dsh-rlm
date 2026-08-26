@@ -5,7 +5,7 @@ export const name = "@seamlabs/dsh-rlm/persona";
 export const inject = ["systemPrompt", "tools"];
 
 const CHILD_PREAMBLE = `You are a delegated subagent, not the RLM coordinator.
-Use native file tools (read, grep, glob, bash). Do not wander the whole disk.
+Use native file tools (read, grep, glob, bash or pwsh). Do not wander the whole disk.
 Stay inside the working directory unless the task names another path.
 When the review is done, write a concise final answer and stop.
 `;

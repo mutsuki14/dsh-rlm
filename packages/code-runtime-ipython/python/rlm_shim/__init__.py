@@ -10,7 +10,7 @@ from typing import Any
 
 from .host import host_request, host_request_sync
 
-RLM_VERSION = "0.4.10"
+RLM_VERSION = "0.4.11"
 _SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
 
 
@@ -266,7 +266,7 @@ def install(ns: dict[str, Any] | None = None) -> None:
         _builtin_print(*tuple(sanitize(a) if isinstance(a, str) else a for a in args), **kw)
 
     target["print"] = _print
-    target.setdefault("tools", _ToolsProxy("tools", ["bash", "read", "write"]))
+    target.setdefault("tools", _ToolsProxy("tools", ["bash", "pwsh", "read", "write"]))
     # Seed empty context; host injects haystack via injectNamespace / rlm.set_haystack.
     # Do NOT call load_haystack() here — install runs at kernel boot before the host loop.
     target.setdefault("context", "")
@@ -390,6 +390,10 @@ class _ToolsProxy:
         self._global = global_name
         for name in names:
             setattr(self, name, _BoundTool(global_name, name))
+        if not hasattr(self, "bash"):
+            setattr(self, "bash", _BoundTool(global_name, "bash"))
+        if not hasattr(self, "pwsh"):
+            setattr(self, "pwsh", _BoundTool(global_name, "pwsh"))
 
 
 class _BoundTool:
@@ -399,7 +403,17 @@ class _BoundTool:
 
     async def __call__(self, args: Any = None, **kw: Any):
         payload = args if args is not None else kw
-        return await host_request(
-            "tools.dispatch",
-            {"global": self._global, "name": self._name, "args": payload},
-        )
+        if isinstance(payload, str) and self._name in ("bash", "pwsh", "shell"):
+            payload = {"command": payload, "description": payload[:80] or self._name}
+        try:
+            return await host_request(
+                "tools.dispatch",
+                {"global": self._global, "name": self._name, "args": payload},
+            )
+        except RuntimeError:
+            if self._name == "bash":
+                return await host_request(
+                    "tools.dispatch",
+                    {"global": self._global, "name": "pwsh", "args": payload},
+                )
+            raise
