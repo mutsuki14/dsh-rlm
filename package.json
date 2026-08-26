@@ -1,7 +1,7 @@
 {
   "name": "@seamlabs/dsh-rlm",
-  "version": "0.2.0",
-  "description": "Persistent RLM kernel for DeepSeek Harness: codeRuntime + rlm() + snapshot",
+  "version": "0.3.0",
+  "description": "Persistent RLM kernel for DeepSeek Harness: non-blocking rlm(), haystack context, skills",
   "type": "module",
   "license": "MIT",
   "repository": {
