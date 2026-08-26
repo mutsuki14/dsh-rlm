@@ -29,6 +29,11 @@ class IPythonCodeRuntime {
     this.host = host;
     if (Number.isFinite(options.maxDepth)) this.maxDepth = Math.max(0, options.maxDepth);
     if (Number.isFinite(options.waitTimeoutMs)) this.waitTimeoutMs = Math.max(1000, options.waitTimeoutMs);
+    else if (Number.isFinite(Number(process.env.DSH_RLM_WAIT_MS))) {
+      this.waitTimeoutMs = Math.max(1000, Number(process.env.DSH_RLM_WAIT_MS));
+    } else {
+      this.waitTimeoutMs = 900000;
+    }
   }
 
   sessionId() {
@@ -422,32 +427,72 @@ class IPythonCodeRuntime {
     let last = this.readChildSnapshot(id);
     let stable = null;
     let stableHits = 0;
+    let sawRunning = false;
+
+    const commit = (snap) => {
+      const delta = Array.isArray(snap.parts) ? snap.parts.slice(seen).filter(Boolean) : [];
+      const text = delta.length ? sanitizeText(delta.join("\n\n")) : snap.text;
+      meta.lastText = text;
+      meta.assistantCount = snap.count;
+      meta.status = "done";
+      meta.awaitingFollowup = false;
+      if (!this.children.has(id)) {
+        this.children.set(id, { ...meta, id, name: meta.name ?? id, mode: meta.mode ?? "continuable" });
+      }
+      return text;
+    };
+
     while (Date.now() < deadline) {
       last = this.readChildSnapshot(id);
+      const childAgent = this.childAgent(id);
+      const running = childAgent?.status === "running";
+      if (running) sawRunning = true;
+
+      if (running && typeof childAgent.whenIdle === "function") {
+        const remain = Math.max(1000, deadline - Date.now());
+        try {
+          await Promise.race([
+            childAgent.whenIdle(),
+            new Promise((_, rej) => setTimeout(() => rej(new Error("idle-timeout")), remain)),
+          ]);
+        } catch {
+          /* fall through to snapshot / overall timeout */
+        }
+        last = this.readChildSnapshot(id);
+        if (last.text && (seen === 0 ? last.count > 0 : last.count > seen)) return commit(last);
+        if (last.text) return commit(last);
+        continue;
+      }
+
       const newer = Boolean(last.text) && (seen === 0 ? last.count > 0 : last.count > seen);
-      if (newer) {
+      if (newer && !running) {
         if (last.text === stable) stableHits += 1;
         else {
           stable = last.text;
           stableHits = 1;
         }
-        const act = await this.childActivity(id);
-        const idle = ["done", "completed", "idle", "waiting", "ready"].includes(act);
-        if (idle || stableHits >= 2) {
-          meta.lastText = last.text;
-          meta.assistantCount = last.count;
-          meta.status = "done";
-          meta.awaitingFollowup = false;
-          if (!this.children.has(id)) {
-            this.children.set(id, { ...meta, id, name: meta.name ?? id, mode: meta.mode ?? "continuable" });
-          }
-          return last.text;
-        }
+        const idle = !childAgent || childAgent.status === "idle" || sawRunning || stableHits >= 2;
+        if (idle) return commit(last);
       }
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 250));
     }
-    if (last?.text && last.count > seen) return last.text;
-    throw new Error(`rlm.wait: timed out waiting for ${id}`);
+
+    last = this.readChildSnapshot(id);
+    if (last?.text) return commit(last);
+    const agent = this.childAgent(id);
+    throw new Error(
+      `rlm.wait: timed out waiting for ${id} (agent=${agent ? agent.status : "missing"} messages=${last?.count ?? 0})`,
+    );
+  }
+
+  childAgent(id) {
+    try {
+      const agent = this.ctx.agents?.get?.(id);
+      if (agent && String(agent.id) === String(id)) return agent;
+    } catch {
+      /* optional */
+    }
+    return null;
   }
 
   async childActivity(id) {
@@ -464,27 +509,37 @@ class IPythonCodeRuntime {
 
   readChildSnapshot(id) {
     const session = this.ctx.sessions?.get?.(id) || this.ctx.sessions?.get?.(String(id));
-    if (!session) return { text: null, count: 0 };
+    if (!session) return { text: null, count: 0, parts: [] };
     let messages = [];
     try {
       messages = session.deriveMessages?.() ?? session.messages ?? [];
     } catch {
       messages = [];
     }
-    if (!Array.isArray(messages)) return { text: null, count: 0 };
+    if (!Array.isArray(messages) || messages.length === 0) {
+      try {
+        const events = session.events;
+        if (Array.isArray(events)) {
+          messages = events
+            .filter((ev) => ev?.type === "assistant/message")
+            .map((ev) => ev.data?.message ?? ev.data)
+            .filter(Boolean);
+        }
+      } catch {
+        messages = [];
+      }
+    }
+    if (!Array.isArray(messages)) return { text: null, count: 0, parts: [] };
     const assistants = messages.filter(
       (m) => m?.role === "assistant" || m?.kind === "assistant" || m?.type === "assistant",
     );
-    const last = assistants.at(-1);
-    if (!last) return { text: null, count: 0 };
-    const content = last.content ?? last.text ?? last.message;
-    let text = null;
-    if (typeof content === "string") text = content;
-    else if (Array.isArray(content)) text = outputValueText(content);
-    else if (content != null) text = String(content);
-    if (typeof text === "string" && /^started subagent/i.test(text.trim())) text = null;
-    if (typeof text === "string") text = sanitizeText(text);
-    return { text, count: assistants.length };
+    const parts = [];
+    for (const msg of assistants) {
+      const t = assistantText(msg);
+      if (t && !/^started subagent/i.test(t.trim())) parts.push(t);
+    }
+    const text = parts.length ? sanitizeText(parts.join("\n\n")) : null;
+    return { text, count: assistants.length, parts };
   }
 
   async listChildrenProjected() {
@@ -782,6 +837,16 @@ function foldSubagentOutput(settled) {
   if (output && typeof output === "object" && typeof output.text === "string") {
     return sanitizeText(output.text);
   }
+  return null;
+}
+
+function assistantText(msg) {
+  if (!msg) return null;
+  if (typeof msg === "string") return msg;
+  const content = msg.content ?? msg.text ?? msg.message;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return outputValueText(content);
+  if (content && typeof content === "object" && typeof content.text === "string") return content.text;
   return null;
 }
 

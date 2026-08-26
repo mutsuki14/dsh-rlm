@@ -154,6 +154,41 @@ await h.message("again")
   await provided.dispose();
 }
 
+// 4b. DSH assistant messages are ContentBlock[]; last may be tool-only
+{
+  const childId = "c-blocks";
+  const agentBox = { current: { id: "p1", session: { id: "p1" } } };
+  const { provided } = ctxFor(agentBox, {
+    subagents: {
+      startContinuable: async () => ({ childId, messageId: "m" }),
+      listChildren: async () => [{ id: childId, mode: "continuable", activity: "running" }],
+      start: async () => {
+        throw new Error("start should not run");
+      },
+    },
+    sessions: {
+      get: () => ({
+        deriveMessages: () => [
+          { role: "assistant", content: [{ type: "text", text: "found 3 issues" }] },
+          { role: "assistant", content: [{ type: "tool-use", name: "read" }] },
+        ],
+      }),
+      append() {},
+    },
+  });
+  const r = await provided.run({
+    program: `h = await rlm("review", name="auth")
+print("WAIT", await h.wait())
+`,
+    bindings: [],
+  });
+  const logs = (r.logs || []).join("\n");
+  if (r.error) fail(`content-block wait: ${r.error.message}`);
+  else if (!logs.includes("found 3 issues")) fail(`block wait logs ${logs}`);
+  else console.log("ok content-block wait folds earlier text");
+  await provided.dispose();
+}
+
 // 5. unpaired UTF-16 surrogates in child output must not crash the kernel
 {
   const dirty = "hello\uDCAC world 👍";
@@ -183,8 +218,8 @@ print("ok-surrogate")
   const logs = (r.logs || []).join("\n");
   if (r.error) fail(`surrogate crash: ${r.error.message}`);
   else if (!logs.includes("ok-surrogate")) fail(`surrogate logs ${logs}`);
-  else if (!logs.includes("ver 0.4.4")) fail(`version not injected ${logs}`);
-  else if (!logs.includes("rlm 0.4.4")) fail(`execute banner ${logs}`);
+  else if (!logs.includes("ver 0.4.5")) fail(`version not injected ${logs}`);
+  else if (!logs.includes("rlm 0.4.5")) fail(`execute banner ${logs}`);
   else if (logs.includes("\uDCAC")) fail(`surrogate leaked into logs ${JSON.stringify(logs)}`);
   else console.log("ok surrogate sanitized");
   await provided.dispose();

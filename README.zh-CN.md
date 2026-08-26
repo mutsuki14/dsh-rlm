@@ -4,7 +4,7 @@
 
 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的持久化 **递归语言模型（RLM）** 运行时。
 
-当前版本：**v0.4.4**（0.4 生产加固；子代理输出里的非法 surrogate 不再打爆 kernel）。
+当前版本：**v0.4.5**（wait 等 child idle，超时 15 分钟；surrogate 安全）。
 
 它把默认「每次 `run_code` 新开 worker 线程」换成 **按会话常驻的 Python kernel**，暴露**非阻塞** `await rlm()`（可并行 fan-out 再 `wait()`），用 `handle.message()` 对**同一个 child** 再推一轮，注入 `context`/haystack，并把技能写成 kebab-case 包（`SKILL.md` + `__init__.py`）。
 
