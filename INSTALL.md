@@ -1,17 +1,24 @@
 # Mount into DeepSeek Harness
 
-One bundle. The package.json `dsh.bundle.patch` field is what `dsh plugin add` looks for.
+`package.json` declares `dsh.bundle.patch`. `dsh plugin add` stacks that file as a **top-level YAML array of loader patch entries** — not a `cordis.yml` object.
 
 ```sh
-# new profile
-dsh plugin --profile rlm add @deepseek-ai/dsh-base
-dsh plugin --profile rlm add github:mutsuki14/seam-rlm
-
-# or overlay an existing profile
-dsh --profile web --patch ./cordis.patch.yml
+dsh plugin --profile web add github:mutsuki14/seam-rlm
 ```
 
-The patch replaces the `code-runtime` row (`id: code-runtime`) with the persistent JSONL kernel and turns `tools.mode` to `code`. Later layers win per row — if a home-level patch resets `tools.mode`, put this overlay last.
+If an older copy is already installed:
+
+```sh
+dsh plugin --profile web update github:mutsuki14/seam-rlm
+```
+
+Then restart the profile. The layer:
+
+1. disables the stock `code-runtime` worker-thread row (id-targeted `name` cannot rename a row)
+2. inserts `rlm-runtime` / `rlm-bindings` / `rlm-persona` / `rlm-snapshot`
+3. restates `tools.mode: code` (a patch replaces the whole `config`)
+
+A later home-level `cordis.patch.yml` that writes `tools` again will overwrite this. Put this bundle last, or restate `mode: code` in the home layer.
 
 ```sh
 node --experimental-strip-types test-repl.mjs
