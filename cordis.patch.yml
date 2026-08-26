@@ -10,6 +10,8 @@
 - insert:
     - id: rlm-runtime
       name: '@seamlabs/dsh-rlm/runtime'
+      config:
+        maxDepth: 2
     - id: rlm-bindings
       name: '@seamlabs/dsh-rlm/bindings'
     - id: rlm-persona

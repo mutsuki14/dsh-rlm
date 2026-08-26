@@ -6,6 +6,8 @@ Invariants:
 - The only model-visible tool is run_code. Other capabilities are Python.
 - Spawn work with await rlm(prompt, name=...). Handles persist across turns.
   await handle.wait() fills handle.result.
+  Nested rlm() is allowed until remaining depth hits 0 (default maxDepth=2).
+  save_skill(name, code) persists under the harness skill dir; load_skill(name) execs it.
 - Path("file").read_text() / .write_text() re-enter tools/execute. No open().
 - %%bash as a whole cell, or await tools.bash("ls"). Allowlisted on the host.
 - load_haystack() / save_skill(name, code) / load_skill(name) are host calls.
