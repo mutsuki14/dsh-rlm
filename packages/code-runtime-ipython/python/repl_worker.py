@@ -128,15 +128,16 @@ class _TopReturn(ast.NodeTransformer):
 
 
 def _run_bash(script: str) -> Any:
+    args = {"command": script, "description": "%%bash"}
     try:
         return _host_request(
             "tools.dispatch",
-            {"global": "tools", "name": "bash", "args": {"command": script}},
+            {"global": "tools", "name": "bash", "args": args},
         )
     except RuntimeError:
         return _host_request(
             "tools.dispatch",
-            {"global": "tools", "name": "pwsh", "args": {"command": script}},
+            {"global": "tools", "name": "pwsh", "args": args},
         )
 
 

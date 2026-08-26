@@ -192,11 +192,15 @@ class IPythonCodeRuntime {
           name = ns?.functions?.pwsh ? "pwsh" : ns?.functions?.shell ? "shell" : name;
           fn = ns?.functions?.[name];
         }
-        if (typeof fn === "function") return fn(params.args);
+        const args = params.args && typeof params.args === "object" ? { ...params.args } : params.args ?? {};
+        if (name === "pwsh" && args && args.description == null) {
+          args.description = String(args.command ?? "shell").slice(0, 80);
+        }
+        if (typeof fn === "function") return fn(args);
         return this.ctx.tools.execute({
           global: params.global,
           name,
-          args: params.args,
+          args,
         });
       }
       throw new Error(`unknown host method ${method}`);
