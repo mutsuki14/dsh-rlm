@@ -22,6 +22,7 @@ import threading
 import traceback
 from typing import Any
 
+from rlm_shim import RLM_VERSION
 from rlm_shim import bind as shim_bind
 from rlm_shim import host as shim_host
 from rlm_shim import inject as shim_inject
@@ -31,7 +32,43 @@ from rlm_shim import sanitize as _clean
 from rlm_shim import snapshot as shim_snapshot
 
 NS: dict[str, Any] = {"__name__": "__main__"}
-_REAL_STDOUT = sys.stdout
+_ORIG_DUMPS = json.dumps
+_RAW_STDOUT = sys.stdout
+_RAW_STDERR = sys.stderr
+
+
+class _SafeText:
+    """stdout/stderr that never utf-8-encodes lone surrogates (Python raises even with errors='replace')."""
+
+    def __init__(self, inner: Any):
+        self._inner = inner
+
+    def write(self, data: Any) -> int:
+        if isinstance(data, bytes):
+            data = data.decode("utf-8", "replace")
+        if isinstance(data, str):
+            data = _clean(data)
+        return self._inner.write(data)
+
+    def writelines(self, lines: Any) -> None:
+        for line in lines:
+            self.write(line)
+
+    def flush(self) -> None:
+        return self._inner.flush()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _safe_dumps(obj: Any, *args: Any, **kwargs: Any) -> str:
+    return _ORIG_DUMPS(_clean(obj), *args, **kwargs)
+
+
+json.dumps = _safe_dumps  # type: ignore[assignment]
+_REAL_STDOUT = _SafeText(_RAW_STDOUT)
+sys.stdout = _REAL_STDOUT
+sys.stderr = _SafeText(_RAW_STDERR)
 _HOST_LOCK = threading.Lock()
 
 
@@ -42,9 +79,9 @@ def _clean_str(s: str) -> str:
 def _json(value: Any) -> str:
     cleaned = _clean(value)
     try:
-        return json.dumps(cleaned, ensure_ascii=False)
+        return _ORIG_DUMPS(cleaned, ensure_ascii=False)
     except (UnicodeEncodeError, ValueError, TypeError):
-        return json.dumps(cleaned, ensure_ascii=True, default=lambda o: str(type(o).__name__))
+        return _ORIG_DUMPS(cleaned, ensure_ascii=True, default=lambda o: str(type(o).__name__))
 
 
 def _dump(value: Any) -> Any:
@@ -140,6 +177,7 @@ def handle(msg: dict[str, Any]) -> dict[str, Any]:
             return {"type": "result", "id": mid, "logs": [], "value": "pong"}
         if method == "execute":
             value, logs = _run_cell(params.get("program") or "")
+            logs = [f"rlm {RLM_VERSION}", *logs]
             return {"type": "result", "id": mid, "logs": logs, "value": _dump(value)}
         if method == "snapshot":
             return {"type": "result", "id": mid, "logs": [], "value": shim_snapshot(NS)}

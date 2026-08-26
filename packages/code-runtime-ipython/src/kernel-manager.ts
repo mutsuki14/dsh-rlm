@@ -137,7 +137,7 @@ export class KernelManager {
       this.stderrBuf = "";
       const proc = spawn(bin, args, {
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, PYTHONPATH: root, PYTHONUNBUFFERED: "1" },
+        env: { ...process.env, PYTHONPATH: root, PYTHONUNBUFFERED: "1", PYTHONUTF8: "1" },
         windowsHide: true,
       });
       this.proc = proc;
