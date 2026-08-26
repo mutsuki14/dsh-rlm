@@ -88,7 +88,26 @@ class IPythonCodeRuntime {
         const run = this.runs.get(id);
         if (run?.result) {
           const settled = await run.result;
-          return { result: foldSubagentOutput(settled), status: "done" };
+          const folded = foldSubagentOutput(settled);
+          if (folded != null && folded !== "") {
+            return { result: folded, status: "done" };
+          }
+          if (settled?.stopReason && settled.stopReason !== "running") {
+            return {
+              result: folded,
+              status: settled.stopReason,
+              diagnostic: settled.diagnostic ?? null,
+            };
+          }
+          const polled = await this.waitContinuable(id);
+          if (polled != null && polled !== "") {
+            return { result: polled, status: "done" };
+          }
+          return {
+            result: folded,
+            status: settled?.stopReason ?? "done",
+            diagnostic: settled.diagnostic ?? null,
+          };
         }
         const result = await this.waitContinuable(id);
         return { result, status: "done" };
@@ -216,22 +235,41 @@ function childIdFrom(out) {
 }
 
 function foldSubagentOutput(settled) {
-  if (!settled || typeof settled !== "object") return settled ?? null;
+  if (settled == null) return null;
+  if (typeof settled === "string") return settled;
+  if (typeof settled !== "object") return String(settled);
   if (settled.structured != null) return settled.structured;
-  const output = settled.output;
+  const output = settled.output ?? settled.content ?? settled;
   if (typeof output === "string") return output;
-  if (!Array.isArray(output)) return output ?? null;
+  if (Array.isArray(output)) return outputValueText(output);
+  if (output && typeof output === "object" && typeof output.text === "string") {
+    return output.text;
+  }
+  return null;
+}
+
+function outputValueText(values) {
   const texts = [];
-  for (const msg of output) {
-    const content = msg?.content ?? msg;
+  for (const value of values) {
+    if (typeof value === "string") {
+      texts.push(value);
+      continue;
+    }
+    if (!value || typeof value !== "object") continue;
+    if (value.type === "text" && typeof value.text === "string") {
+      texts.push(value.text);
+      continue;
+    }
+    const content = value.content ?? value.text ?? value.message;
     if (typeof content === "string") texts.push(content);
     else if (Array.isArray(content)) {
       for (const b of content) {
-        if (b && typeof b.text === "string") texts.push(b.text);
+        if (typeof b === "string") texts.push(b);
+        else if (b && typeof b.text === "string") texts.push(b.text);
       }
     }
   }
-  return texts.join("\n") || null;
+  return texts.join("") || null;
 }
 
 export function apply(ctx) {
