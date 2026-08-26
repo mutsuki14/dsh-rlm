@@ -46,42 +46,42 @@ class IPythonCodeRuntime {
               `run_code must snapshot the parent at run() entry.`,
           );
         }
-        const tools = this.lastBindings.find((b) => b.global === "tools")?.functions;
-        const spawnFn = tools?.subagent || tools?.subagent_fork;
-        if (typeof spawnFn === "function") {
+        try {
+          const run = await this.ctx.subagents.start("spawn", {
+            label: params.name ?? "rlm",
+            prompt: [{ type: "text", text: String(params.prompt ?? "") }],
+            parent,
+            signal: this.lastSignal ?? new AbortController().signal,
+            maxDepth: 2,
+          });
+          this.runs.set(String(run.id), run);
+          return {
+            rlm_child_id: run.id,
+            name: params.name ?? run.id,
+            session_dir: run.localAgent?.session?.dir ?? "",
+            model: run.localAgent?.model ?? "",
+            status: "running",
+          };
+        } catch (startErr) {
+          const tools = this.lastBindings.find((b) => b.global === "tools")?.functions;
+          const spawnFn = tools?.subagent || tools?.subagent_fork;
+          if (typeof spawnFn !== "function") throw startErr;
           const out = await spawnFn({
             description: params.name ?? "rlm",
             prompt: String(params.prompt ?? ""),
-            run_in_background: true,
+            run_in_background: false,
           });
-          const id = childIdFrom(out);
-          if (!id) {
-            throw new Error(`rlm(): subagent spawn returned no id: ${JSON.stringify(out)}`);
-          }
-          this.runs.set(String(id), { kind: "continuable", id });
+          const id = childIdFrom(out) ?? `rlm-${Date.now()}`;
+          this.runs.set(String(id), { result: Promise.resolve({ output: out }) });
           return {
             rlm_child_id: id,
             name: params.name ?? id,
             session_dir: "",
             model: "",
-            status: "running",
+            status: "done",
+            result: typeof out === "string" ? out : out?.output ?? out,
           };
         }
-        const run = await this.ctx.subagents.start("spawn", {
-          label: params.name ?? "rlm",
-          prompt: [{ type: "text", text: String(params.prompt ?? "") }],
-          parent,
-          signal: this.lastSignal ?? new AbortController().signal,
-          maxDepth: 2,
-        });
-        this.runs.set(String(run.id), run);
-        return {
-          rlm_child_id: run.id,
-          name: params.name ?? run.id,
-          session_dir: run.localAgent?.session?.dir ?? "",
-          model: run.localAgent?.model ?? "",
-          status: "running",
-        };
       }
       if (method === "rlm.wait") {
         const id = String(params.rlm_child_id);
@@ -136,17 +136,7 @@ class IPythonCodeRuntime {
     let last = null;
     while (Date.now() < deadline) {
       last = this.readChildOutput(id);
-      let activity;
-      try {
-        const rows = await this.ctx.subagents.listChildren(this.sessionId());
-        const row = Array.isArray(rows)
-          ? rows.find((r) => String(r.id ?? r.childId) === id)
-          : undefined;
-        activity = row?.activity;
-      } catch {
-        activity = undefined;
-      }
-      if (last != null && last !== "" && activity !== "running") return last;
+      if (last != null && last !== "") return last;
       await new Promise((r) => setTimeout(r, 400));
     }
     if (last != null && last !== "") return last;
