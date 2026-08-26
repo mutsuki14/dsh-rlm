@@ -71,7 +71,9 @@ class IPythonCodeRuntime {
           );
         }
         const remaining = this.remainingDepth();
-        if (remaining <= 0) throw new Error(`rlm(): max recursion depth (${this.maxDepth})`);
+        if (remaining <= 0) {
+          throw new Error(`rlm(): max recursion depth (${this.maxDepth})`);
+        }
         const childPrompt = String(params.prompt ?? "");
         const tools = this.lastBindings.find((b) => b.global === "tools")?.functions;
         const spawnFn = tools?.subagent || tools?.subagent_fork;
@@ -230,29 +232,38 @@ class IPythonCodeRuntime {
   }
 
   async run(request) {
-    this.lastParent = this.resolveParent();
-    this.lastBindings = request.bindings ?? [];
-    this.lastSignal = request.signal;
-    const id = this.sessionId();
-    let km = this.kernels.get(id);
-    if (!km) {
-      km = new KernelManager(id, this.hostHandler());
-      try {
-        await km.start();
-      } catch (err) {
-        await km.shutdown().catch(() => undefined);
-        return {
-          logs: [],
-          error: {
-            kind: "KernelStart",
-            message: err instanceof Error ? err.message : String(err),
-          },
-        };
+    const prevParent = this.lastParent;
+    const prevBindings = this.lastBindings;
+    const prevSignal = this.lastSignal;
+    try {
+      this.lastParent = this.resolveParent();
+      this.lastBindings = request.bindings ?? [];
+      this.lastSignal = request.signal;
+      const id = this.sessionId();
+      let km = this.kernels.get(id);
+      if (!km) {
+        km = new KernelManager(id, this.hostHandler());
+        try {
+          await km.start();
+        } catch (err) {
+          await km.shutdown().catch(() => undefined);
+          return {
+            logs: [],
+            error: {
+              kind: "KernelStart",
+              message: err instanceof Error ? err.message : String(err),
+            },
+          };
+        }
+        this.kernels.set(id, km);
       }
-      this.kernels.set(id, km);
+      await km.installBindings(request.bindings);
+      return await km.execute(request.program, request.signal);
+    } finally {
+      this.lastParent = prevParent;
+      this.lastBindings = prevBindings;
+      this.lastSignal = prevSignal;
     }
-    await km.installBindings(request.bindings);
-    return km.execute(request.program, request.signal);
   }
 
   async snapshot(sessionId) {
@@ -291,7 +302,14 @@ function childIdFrom(out) {
 
 function foldSubagentOutput(settled) {
   if (settled == null) return null;
-  if (typeof settled === "string") return settled;
+  if (typeof settled === "string") {
+    const s = settled.trim();
+    if (!s || /^started subagent/i.test(s)) return null;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) {
+      return null;
+    }
+    return settled;
+  }
   if (typeof settled !== "object") return String(settled);
   if (settled.structured != null) return settled.structured;
   const output = settled.output ?? settled.content ?? settled;

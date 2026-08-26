@@ -140,7 +140,7 @@ def install(ns: dict[str, Any] | None = None) -> None:
     def load_skill(name: str) -> str:
         code = host_request_sync("rlm.load_skill", {"name": name}) or ""
         if not code:
-            raise RuntimeError(f"harness missing skill {name}")
+            raise RuntimeError(f"harness 里没有 {name}")
         exec(compile(code, f"<skill:{name}>", "exec"), target)
         return code
 

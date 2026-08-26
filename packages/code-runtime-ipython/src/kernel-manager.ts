@@ -39,6 +39,7 @@ export class KernelManager {
   private pending = new Map<string, Pending>();
   private chain = Promise.resolve();
   private pythonRootDir?: string;
+  private stderrBuf = "";
 
   constructor(sessionId: string, host?: HostHandler, pythonRootDir?: string) {
     this.sessionId = sessionId;
@@ -49,19 +50,31 @@ export class KernelManager {
   async start() {
     const root = this.pythonRootDir ?? pythonRoot();
     const worker = join(root, "repl_worker.py");
-    this.proc = spawn(process.env.DSH_RLM_PYTHON ?? "python3", ["-u", worker], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PYTHONPATH: root, PYTHONUNBUFFERED: "1" },
-    });
-    this.proc.stdout?.setEncoding("utf8");
-    this.proc.stderr?.setEncoding("utf8");
-    this.proc.stdout?.on("data", (chunk: string) => this.onData(chunk));
-    this.proc.on("exit", (code) => {
-      const err = new Error(`kernel exited ${code}`);
-      for (const p of this.pending.values()) p.reject(err);
-      this.pending.clear();
-    });
-    await this.rpc("ping");
+    const tried: string[] = [];
+    for (const c of pythonCandidates()) {
+      const label = [c.bin, ...c.prefix].join(" ");
+      try {
+        await this.attach(c.bin, [...c.prefix, "-u", worker], root);
+        await Promise.race([
+          this.rpc("ping"),
+          new Promise((_, rej) =>
+            setTimeout(() => rej(new Error("ping timeout")), 8000),
+          ),
+        ]);
+        return;
+      } catch (err) {
+        tried.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+        await this.detach();
+        if (!isMissingBin(err)) {
+          throw new Error(
+            `kernel start failed with ${label}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    }
+    throw new Error(
+      `kernel start failed: no Python 3 on PATH (${tried.join("; ")}). Install Python 3 or set DSH_RLM_PYTHON to the executable (Windows: py or python). Exit 9009 means the command was not found.`,
+    );
   }
 
   async installBindings(bindings: CodeBindingNamespace[]) {
@@ -116,6 +129,61 @@ export class KernelManager {
       proc.stdin?.end();
       proc.kill("SIGTERM");
     }
+  }
+
+  private attach(bin: string, args: string[], root: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.buf = "";
+      this.stderrBuf = "";
+      const proc = spawn(bin, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, PYTHONPATH: root, PYTHONUNBUFFERED: "1" },
+        windowsHide: true,
+      });
+      this.proc = proc;
+      proc.stdout?.setEncoding("utf8");
+      proc.stderr?.setEncoding("utf8");
+      proc.stdout?.on("data", (chunk: string) => this.onData(chunk));
+      proc.stderr?.on("data", (chunk: string) => {
+        this.stderrBuf += chunk;
+      });
+      const fail = (err: Error) => reject(err);
+      proc.once("error", fail);
+      proc.once("spawn", () => {
+        proc.off("error", fail);
+        proc.on("error", (err) => this.rejectAll(err));
+        proc.on("exit", (code) => {
+          const tail = this.stderrBuf.trim();
+          this.rejectAll(
+            new Error(`kernel exited ${code}${tail ? `: ${tail.slice(0, 500)}` : ""}`),
+          );
+        });
+        proc.unref();
+        proc.stdin?.unref?.();
+        proc.stdout?.unref?.();
+        proc.stderr?.unref?.();
+        resolve();
+      });
+    });
+  }
+
+  private rejectAll(err: Error) {
+    for (const p of this.pending.values()) p.reject(err);
+    this.pending.clear();
+  }
+
+  private async detach() {
+    const proc = this.proc;
+    this.proc = null;
+    this.pending.clear();
+    this.buf = "";
+    if (!proc) return;
+    try {
+      proc.stdin?.end();
+    } catch {
+      /* ignore */
+    }
+    proc.kill("SIGTERM");
   }
 
   private rpc(
@@ -185,4 +253,27 @@ export class KernelManager {
 
 function pythonRoot() {
   return join(dirname(fileURLToPath(import.meta.url)), "../python");
+}
+
+function pythonCandidates(): { bin: string; prefix: string[] }[] {
+  const env = process.env.DSH_RLM_PYTHON;
+  if (env) return [{ bin: env, prefix: [] }];
+  if (process.platform === "win32") {
+    return [
+      { bin: "py", prefix: ["-3"] },
+      { bin: "python", prefix: [] },
+      { bin: "python3", prefix: [] },
+    ];
+  }
+  return [
+    { bin: "python3", prefix: [] },
+    { bin: "python", prefix: [] },
+  ];
+}
+
+function isMissingBin(err: unknown) {
+  const e = err as { code?: string; message?: string };
+  if (e.code === "ENOENT") return true;
+  const m = String(e.message ?? "");
+  return m.includes("ENOENT") || m.includes("exited 9009");
 }

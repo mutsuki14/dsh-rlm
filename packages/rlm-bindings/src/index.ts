@@ -1,7 +1,7 @@
 import type { Context } from "@deepseek-ai/cordis";
 
 export const name = "@seamlabs/dsh-rlm/bindings";
-export const inject = ["subagents", "tools", "codeRuntime"];
+export const inject = ["subagents", "tools", "codeRuntime", "agents"];
 
 export function apply(ctx: Context) {
   ctx.on("code-runtime/bindings", async (bindings, next) => {
@@ -9,23 +9,27 @@ export function apply(ctx: Context) {
       global: "rlm",
       functions: {
         run: async (args: { prompt: string; name?: string }) => {
-          const child = await ctx.subagents
-            .getProvider("spawn-in-process")
-            .start({
-              prompt: args.prompt,
-              name: args.name,
-              maxDepth: ctx.config.rlm?.maxDepth ?? 2,
-            });
+          const parent = ctx.agents.get(ctx.get("agentSessionId"));
+          const run = await ctx.subagents.start("spawn", {
+            label: args.name ?? "rlm",
+            prompt: [{ type: "text", text: args.prompt }],
+            parent,
+            signal: new AbortController().signal,
+            maxDepth: 2,
+          });
           return {
-            rlm_child_id: child.id,
-            name: args.name ?? child.id,
-            session_dir: child.sessionDir,
-            model: child.model,
+            rlm_child_id: run.id,
+            name: args.name ?? run.id,
+            session_dir: "",
+            model: "",
           };
         },
-        list_subagents: async () => ctx.subagents.list(ctx.get("agentSessionId")),
+        list_subagents: async () => ctx.subagents.listChildren(ctx.get("agentSessionId")),
         delete_subagent: async (args: { rlm_child_id: string }) => {
-          await ctx.subagents.drain(args.rlm_child_id);
+          await ctx.subagents.drainContinuableChildren(
+            ctx.agents.get(ctx.get("agentSessionId")),
+            [args.rlm_child_id],
+          );
           return null;
         },
       },

@@ -109,6 +109,7 @@ var KernelManager = class {
       proc.stderr?.on("data", (chunk) => {
         this.stderrBuf += chunk;
       });
+      proc.stdin?.on("error", () => {});
       const fail = (err) => reject(err);
       proc.once("error", fail);
       proc.once("spawn", () => {
@@ -144,6 +145,15 @@ var KernelManager = class {
     }
     proc.kill("SIGTERM");
   }
+  writeStdin(payload) {
+    const stdin = this.proc?.stdin;
+    if (!stdin || stdin.destroyed || stdin.writableEnded) return false;
+    try {
+      return stdin.write(payload);
+    } catch {
+      return false;
+    }
+  }
   rpc(method, params = {}, signal) {
     const id = `${this.sessionId}-${++this.seq}`;
     return new Promise((resolve, reject) => {
@@ -166,7 +176,7 @@ var KernelManager = class {
           reject(e);
         }
       });
-      this.proc.stdin.write(JSON.stringify({ id, method, params }) + "\n");
+      this.writeStdin(JSON.stringify({ id, method, params }) + "\n");
     });
   }
   onData(chunk) {
@@ -186,9 +196,9 @@ var KernelManager = class {
     if (msg.type === "host") {
       try {
         const result = this.host ? await this.host(String(msg.method), msg.params ?? {}) : null;
-        this.proc?.stdin?.write(JSON.stringify({ type: "host_result", id: msg.id, result }) + "\n");
+        this.writeStdin(JSON.stringify({ type: "host_result", id: msg.id, result }) + "\n");
       } catch (err) {
-        this.proc?.stdin?.write(
+        this.writeStdin(
           JSON.stringify({ type: "host_result", id: msg.id, error: String(err) }) + "\n"
         );
       }

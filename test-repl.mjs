@@ -69,7 +69,14 @@ if (!String(bsh.value).includes("haystack.txt")) fail(`bash value ${JSON.stringi
 await km3.shutdown();
 
 const km4 = new KernelManager("path", async (method, params) => {
-  if (method === "tools.dispatch" && params.name === "read") return "xxneedleyy";
+  if (method === "tools.dispatch" && params.name === "read") {
+    return {
+      path: params.args?.file_path,
+      offset: 1,
+      lines: [{ number: 1, text: "xxneedleyy" }],
+      totalLines: 1,
+    };
+  }
   if (method === "rlm.load_haystack") return "haystack-needle-haystack";
   if (method === "rlm.save_skill") return true;
   if (method === "rlm.list_skills") return ["scan"];
@@ -83,6 +90,28 @@ const pth = await km4.execute('p = Path("haystack.txt")\np.read_text().find("nee
 if (pth.error) fail(`path: ${pth.error.message}`);
 if (pth.value !== 2) fail(`path find ${JSON.stringify(pth)}`);
 await km4.shutdown();
+
+const skillStore = new Map();
+const kmSkill = new KernelManager("skill", async (method, params) => {
+  if (method === "rlm.save_skill") {
+    skillStore.set(String(params.name), String(params.code ?? ""));
+    return String(params.name);
+  }
+  if (method === "rlm.load_skill") {
+    const code = skillStore.get(String(params.name));
+    if (code === undefined) throw new Error(`missing ${params.name}`);
+    return code;
+  }
+  if (method === "rlm.list_skills") return [...skillStore.keys()];
+  throw new Error(`unexpected host ${method}`);
+});
+await kmSkill.start();
+const saved = await kmSkill.execute(
+  "save_skill('double', 'def double(x):\\n    return x * 2\\n')\nload_skill('double')\ndouble(21)",
+);
+if (saved.error) fail(`skill: ${saved.error.message}`);
+if (saved.value !== 42) fail(`skill double ${JSON.stringify(saved)}`);
+await kmSkill.shutdown();
 
 const km5 = new KernelManager("inspect", async (method) => {
   if (method === "rlm.load_haystack") return "abcSEAM";
@@ -112,3 +141,4 @@ await km6.shutdown();
 if (process.exitCode) process.exit(process.exitCode);
 console.log("ok persist + snapshot + error + slice + rlm() + %%bash + Path + haystack + inspect/inject");
 process.exit(0);
+

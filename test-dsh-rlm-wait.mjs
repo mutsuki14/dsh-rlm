@@ -23,7 +23,10 @@ const ctx = {
     start: async () => ({
       id: "c3fb07d4-eafa-4f9b-ac1b-fd6c11c3af86",
       result: Promise.resolve({
-        output: [{ type: "text", text: "PONG" }],
+        output: [
+          { type: "thinking", text: "The user asks to reply with exactly PONG." },
+          { type: "text", text: "PONG" },
+        ],
         stopReason: "completed",
       }),
     }),
@@ -52,6 +55,8 @@ console.log("--- logs ---");
 console.log(logs);
 console.log("--- error ---");
 console.log(result.error ?? "(none)");
+console.log("--- value ---");
+console.log(result.value);
 
 if (result.error) {
   console.error("FAIL: kernel error");
@@ -59,6 +64,10 @@ if (result.error) {
 }
 if (!logs.includes("PONG")) {
   console.error("FAIL: expected PONG in logs, got:", JSON.stringify(logs));
+  process.exit(1);
+}
+if (!logs.includes("c3fb07d4-eafa-4f9b-ac1b-fd6c11c3af86")) {
+  console.error("FAIL: expected child id in logs");
   process.exit(1);
 }
 console.log("ok dsh-rlm wait fold + host rlm.run/wait");
