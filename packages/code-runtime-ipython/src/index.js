@@ -14,6 +14,8 @@ class IPythonCodeRuntime {
   runs = new Map();
   aborts = new Map();
   depthBySession = new Map();
+  haystackBySession = new Map();
+  contextInjected = new Set();
   lastParent = null;
   lastBindings = [];
   lastSignal = undefined;
@@ -47,6 +49,20 @@ class IPythonCodeRuntime {
     );
   }
 
+  setHaystack(sessionId, text) {
+    const id = String(sessionId || "default");
+    this.haystackBySession.set(id, String(text ?? ""));
+    this.contextInjected.delete(id);
+  }
+
+  resolveHaystack(sessionId) {
+    const id = String(sessionId || this.sessionId());
+    if (this.haystackBySession.has(id)) return this.haystackBySession.get(id);
+    const global = this.ctx.get("rlm.haystack");
+    if (global != null && global !== "") return String(global);
+    return "";
+  }
+
   skillDir() {
     const home = process.env.DSH_HOME || join(homedir(), ".dsh");
     return join(home, "rlm-skills");
@@ -62,96 +78,31 @@ class IPythonCodeRuntime {
     if (this.host) return this.host;
     return async (method, params) => {
       if (method === "rlm.run") {
-        const parent = this.lastParent || this.resolveParent();
-        if (!parent) {
-          const listed = this.ctx.agents?.list?.()?.length ?? 0;
-          throw new Error(
-            `rlm(): no live agent (initiator empty, agents.list=${listed}). ` +
-              `run_code must snapshot the parent at run() entry.`,
-          );
-        }
-        const remaining = this.remainingDepth();
-        if (remaining <= 0) {
-          throw new Error(`rlm(): max recursion depth (${this.maxDepth})`);
-        }
-        const childPrompt = String(params.prompt ?? "");
-        const tools = this.lastBindings.find((b) => b.global === "tools")?.functions;
-        const spawnFn = tools?.subagent || tools?.subagent_fork;
-        if (typeof spawnFn === "function") {
-          const out = await spawnFn({
-            description: params.name ?? "rlm",
-            prompt: childPrompt,
-            run_in_background: false,
-          });
-          const id = childIdFrom(out) ?? `rlm-${Date.now()}`;
-          const folded = foldSubagentOutput(out);
-          this.runs.set(String(id), {
-            result: Promise.resolve({ output: folded ?? out, stopReason: "completed" }),
-          });
-          this.depthBySession.set(String(id), remaining - 1);
-          return {
-            rlm_child_id: id,
-            name: params.name ?? id,
-            session_dir: "",
-            model: "",
-            status: "done",
-            result: folded,
-          };
-        }
-        const ac = new AbortController();
-        const run = await this.ctx.subagents.start("spawn", {
-          label: params.name ?? "rlm",
-          prompt: [{ type: "text", text: childPrompt }],
-          parent,
-          signal: ac.signal,
-          maxDepth: remaining,
-        });
-        this.runs.set(String(run.id), run);
-        this.aborts.set(String(run.id), ac);
-        this.depthBySession.set(String(run.id), remaining - 1);
-        return {
-          rlm_child_id: run.id,
-          name: params.name ?? run.id,
-          session_dir: run.localAgent?.session?.dir ?? "",
-          model: run.localAgent?.model ?? "",
-          status: "running",
-        };
+        return this.spawnChild(params);
       }
       if (method === "rlm.wait") {
-        const id = String(params.rlm_child_id);
-        const run = this.runs.get(id);
-        if (run?.result) {
-          const settled = await run.result;
-          let folded = foldSubagentOutput(settled);
-          if ((folded == null || folded === "") && !(settled?.stopReason && settled.stopReason !== "running")) {
-            folded = await this.waitContinuable(id);
-          }
-          await disposeRun(run);
-          this.runs.delete(id);
-          const ac = this.aborts.get(id);
-          this.aborts.delete(id);
-          try { ac?.abort?.("rlm.wait settled"); } catch { /* ignore */ }
-          return {
-            result: folded ?? null,
-            status: settled?.stopReason ?? "done",
-            diagnostic: settled?.diagnostic ?? null,
-          };
-        }
-        const result = await this.waitContinuable(id);
-        return { result, status: "done" };
+        return this.waitChild(String(params.rlm_child_id));
       }
       if (method === "rlm.list_subagents") {
         const rows = await this.ctx.subagents.listChildren(this.sessionId());
         return Array.isArray(rows) ? rows : [];
       }
       if (method === "rlm.delete_subagent") {
-        const run = this.runs.get(String(params.rlm_child_id));
+        const id = String(params.rlm_child_id);
+        const run = this.runs.get(id);
         if (run?.dispose) await run.dispose();
-        this.runs.delete(String(params.rlm_child_id));
+        this.runs.delete(id);
+        const ac = this.aborts.get(id);
+        this.aborts.delete(id);
+        try { ac?.abort?.("rlm.delete"); } catch { /* ignore */ }
         return null;
       }
       if (method === "rlm.load_haystack") {
-        return this.ctx.get("rlm.haystack") ?? "";
+        return this.resolveHaystack(this.sessionId());
+      }
+      if (method === "rlm.set_haystack") {
+        this.setHaystack(this.sessionId(), params.text ?? params.haystack ?? "");
+        return true;
       }
       if (method === "rlm.save_skill") {
         const { safe, path } = this.skillPath(params.name);
@@ -196,12 +147,134 @@ class IPythonCodeRuntime {
     };
   }
 
+  /**
+   * Non-blocking spawn. Prefer tools.subagent(background) so nested run_code
+   * does not deadlock under exclusive tool locks; fall back to subagents.start.
+   */
+  async spawnChild(params) {
+    const parent = this.lastParent || this.resolveParent();
+    if (!parent) {
+      const listed = this.ctx.agents?.list?.()?.length ?? 0;
+      throw new Error(
+        `rlm(): no live agent (initiator empty, agents.list=${listed}). ` +
+          `run_code must snapshot the parent at run() entry.`,
+      );
+    }
+    const remaining = this.remainingDepth();
+    if (remaining <= 0) {
+      throw new Error(`rlm(): max recursion depth (${this.maxDepth})`);
+    }
+    const childPrompt = String(params.prompt ?? "");
+    const tools = this.lastBindings.find((b) => b.global === "tools")?.functions;
+    const spawnFn = tools?.subagent || tools?.subagent_fork;
+
+    // Path A: Code Mode binding, background — returns immediately, enables parallel.
+    if (typeof spawnFn === "function") {
+      const out = await spawnFn({
+        description: params.name ?? "rlm",
+        prompt: childPrompt,
+        run_in_background: true,
+      });
+      const id = childIdFrom(out) ?? `rlm-${Date.now()}`;
+      this.trackContinuable(id, remaining - 1);
+      return {
+        rlm_child_id: id,
+        name: params.name ?? id,
+        session_dir: "",
+        model: "",
+        status: "running",
+      };
+    }
+
+    // Path B: host subagents.start — SubagentRun.result is a Promise (non-blocking return).
+    const ac = new AbortController();
+    const run = await this.ctx.subagents.start("spawn", {
+      label: params.name ?? "rlm",
+      prompt: [{ type: "text", text: childPrompt }],
+      parent,
+      signal: ac.signal,
+      maxDepth: remaining,
+    });
+    this.runs.set(String(run.id), run);
+    this.aborts.set(String(run.id), ac);
+    this.depthBySession.set(String(run.id), remaining - 1);
+    return {
+      rlm_child_id: run.id,
+      name: params.name ?? run.id,
+      session_dir: run.localAgent?.session?.dir ?? "",
+      model: run.localAgent?.model ?? "",
+      status: "running",
+    };
+  }
+
+  trackContinuable(id, childDepth) {
+    const key = String(id);
+    this.depthBySession.set(key, childDepth);
+    let settle;
+    const result = new Promise((resolve) => {
+      settle = resolve;
+    });
+    this.runs.set(key, { kind: "continuable", id: key, result });
+    // Background poller fills result so wait() can share one path.
+    (async () => {
+      try {
+        const text = await this.waitContinuable(key);
+        settle({ output: text, stopReason: "completed" });
+      } catch (err) {
+        settle({
+          output: null,
+          stopReason: "error",
+          diagnostic: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+  }
+
+  async waitChild(id) {
+    const run = this.runs.get(id);
+    if (run?.result) {
+      const settled = await run.result;
+      let folded = foldSubagentOutput(settled);
+      if ((folded == null || folded === "") && !(settled?.stopReason && settled.stopReason !== "running")) {
+        folded = await this.waitContinuable(id);
+      }
+      await disposeRun(run);
+      this.runs.delete(id);
+      const ac = this.aborts.get(id);
+      this.aborts.delete(id);
+      try { ac?.abort?.("rlm.wait settled"); } catch { /* ignore */ }
+      return {
+        result: folded ?? null,
+        status: settled?.stopReason ?? "done",
+        diagnostic: settled?.diagnostic ?? null,
+      };
+    }
+    const result = await this.waitContinuable(id);
+    return { result, status: "done" };
+  }
+
   async waitContinuable(id) {
     const deadline = Date.now() + 180000;
     let last = null;
     while (Date.now() < deadline) {
       last = this.readChildOutput(id);
       if (last != null && last !== "") return last;
+
+      // Activity probe: if child listed as idle/done and we still have nothing, keep polling briefly.
+      try {
+        const rows = await this.ctx.subagents.listChildren(this.sessionId());
+        const row = Array.isArray(rows)
+          ? rows.find((r) => String(r.id ?? r.childId ?? r.subagentId) === id)
+          : undefined;
+        if (row) {
+          const act = String(row.activity ?? row.status ?? "").toLowerCase();
+          if ((act === "done" || act === "completed" || act === "idle") && last) {
+            return last;
+          }
+        }
+      } catch {
+        /* listChildren optional */
+      }
       await new Promise((r) => setTimeout(r, 400));
     }
     if (last != null && last !== "") return last;
@@ -209,7 +282,9 @@ class IPythonCodeRuntime {
   }
 
   readChildOutput(id) {
-    const session = this.ctx.sessions?.get?.(id);
+    const session =
+      this.ctx.sessions?.get?.(id) ||
+      this.ctx.sessions?.get?.(String(id));
     if (!session) return null;
     let messages = [];
     try {
@@ -225,10 +300,28 @@ class IPythonCodeRuntime {
     if (!last) return null;
     const content = last.content ?? last.text ?? last.message;
     if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      return content.map((b) => (typeof b === "string" ? b : b?.text ?? "")).join("");
+    if (Array.isArray(content)) return outputValueText(content);
+    return content != null ? String(content) : null;
+  }
+
+  async maybeInjectContext(km, sessionId) {
+    if (this.contextInjected.has(sessionId)) return;
+    const hay = this.resolveHaystack(sessionId);
+    if (hay === "") {
+      // Still mark injected so we don't spam empty assigns; load_haystack can refill later.
+      return;
     }
-    return content ?? null;
+    try {
+      await km.injectNamespace({ context: hay });
+      this.contextInjected.add(sessionId);
+    } catch {
+      try {
+        await km.execute(`context = ${JSON.stringify(hay)}\n`);
+        this.contextInjected.add(sessionId);
+      } catch {
+        /* best-effort */
+      }
+    }
   }
 
   async run(request) {
@@ -240,6 +333,12 @@ class IPythonCodeRuntime {
       this.lastBindings = request.bindings ?? [];
       this.lastSignal = request.signal;
       const id = this.sessionId();
+
+      // Optional per-request haystack override (host tests / future bindings).
+      if (request.haystack != null || request.context != null) {
+        this.setHaystack(id, request.haystack ?? request.context);
+      }
+
       let km = this.kernels.get(id);
       if (!km) {
         km = new KernelManager(id, this.hostHandler());
@@ -258,6 +357,7 @@ class IPythonCodeRuntime {
         this.kernels.set(id, km);
       }
       await km.installBindings(request.bindings);
+      await this.maybeInjectContext(km, id);
       return await km.execute(request.program, request.signal);
     } finally {
       this.lastParent = prevParent;
@@ -348,10 +448,68 @@ function outputValueText(values) {
   return texts.join("") || null;
 }
 
+function extractUserText(ev) {
+  if (ev == null) return "";
+  if (typeof ev === "string") return ev.trim();
+  const direct = [ev.text, ev.message, ev.prompt, ev.userMessage, ev.input, ev.content];
+  for (const c of direct) {
+    if (typeof c === "string" && c.trim()) return c.trim();
+    if (Array.isArray(c)) {
+      const t = outputValueText(c);
+      if (t) return t;
+    }
+  }
+  const msgs = ev.messages ?? ev.history;
+  if (Array.isArray(msgs)) {
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m?.role === "user" || m?.kind === "user" || m?.type === "user") {
+        if (typeof m.content === "string" && m.content.trim()) return m.content.trim();
+        if (Array.isArray(m.content)) {
+          const t = outputValueText(m.content);
+          if (t) return t;
+        }
+        if (typeof m.text === "string" && m.text.trim()) return m.text.trim();
+      }
+    }
+  }
+  return "";
+}
+
+function hookHaystackEvents(ctx, runtime) {
+  const names = [
+    "turn/start",
+    "agent/turn-start",
+    "session/user-message",
+    "user/message",
+  ];
+  for (const name of names) {
+    try {
+      ctx.on(name, async (ev, next) => {
+        try {
+          const text = extractUserText(ev);
+          const sid =
+            ev?.sessionId ??
+            ev?.session?.id ??
+            ctx.get("agentSessionId") ??
+            runtime.sessionId();
+          if (text && sid) runtime.setHaystack(String(sid), text);
+        } catch {
+          /* never block the turn */
+        }
+        return typeof next === "function" ? next() : undefined;
+      });
+    } catch {
+      /* event may not exist on this DSH build */
+    }
+  }
+}
+
 export function apply(ctx, config = {}) {
   const runtime = new IPythonCodeRuntime(ctx, undefined, {
     maxDepth: config.maxDepth ?? 2,
   });
   ctx.provide("codeRuntime", runtime);
   ctx.on("dispose", () => runtime.dispose());
+  hookHaystackEvents(ctx, runtime);
 }
