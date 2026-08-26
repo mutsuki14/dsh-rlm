@@ -77,20 +77,37 @@ class Path:
         self.path = str(path)
 
     def read_text(self, encoding: str = "utf-8") -> str:
-        return host_request_sync(
+        out = host_request_sync(
             "tools.dispatch",
-            {"global": "tools", "name": "read", "args": {"path": self.path, "encoding": encoding}},
+            {"global": "tools", "name": "read", "args": {"file_path": self.path}},
         )
+        if isinstance(out, str):
+            return out
+        if isinstance(out, dict):
+            lines = out.get("lines")
+            if isinstance(lines, list):
+                parts = []
+                for ln in lines:
+                    if isinstance(ln, dict) and isinstance(ln.get("text"), str):
+                        parts.append(ln["text"])
+                    elif isinstance(ln, str):
+                        parts.append(ln)
+                return "\n".join(parts)
+            for k in ("content", "text", "output", "data"):
+                if isinstance(out.get(k), str):
+                    return out[k]
+        return "" if out is None else str(out)
 
     def write_text(self, data: str, encoding: str = "utf-8") -> int:
-        return host_request_sync(
+        host_request_sync(
             "tools.dispatch",
             {
                 "global": "tools",
                 "name": "write",
-                "args": {"path": self.path, "content": data, "encoding": encoding},
+                "args": {"file_path": self.path, "content": str(data)},
             },
         )
+        return len(str(data))
 
     def exists(self) -> bool:
         try:
@@ -123,7 +140,7 @@ def install(ns: dict[str, Any] | None = None) -> None:
     def load_skill(name: str) -> str:
         code = host_request_sync("rlm.load_skill", {"name": name}) or ""
         if not code:
-            raise RuntimeError(f"harness 里没有 {name}")
+            raise RuntimeError(f"harness missing skill {name}")
         exec(compile(code, f"<skill:{name}>", "exec"), target)
         return code
 
