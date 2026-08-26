@@ -1,3 +1,6 @@
+import { mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { KernelManager } from "./kernel-manager.js";
 
 export const name = "@seamlabs/dsh-rlm/runtime";
@@ -10,18 +13,27 @@ class IPythonCodeRuntime {
   skills = new Map();
   runs = new Map();
   aborts = new Map();
+  depthBySession = new Map();
   lastParent = null;
   lastBindings = [];
   lastSignal = undefined;
+  maxDepth = 2;
 
-  constructor(ctx, host) {
+  constructor(ctx, host, options = {}) {
     this.ctx = ctx;
     this.host = host;
+    if (Number.isFinite(options.maxDepth)) this.maxDepth = Math.max(0, options.maxDepth);
   }
 
   sessionId() {
     const parent = this.lastParent;
     return parent?.id ?? parent?.session?.id ?? this.ctx.get("agentSessionId") ?? "default";
+  }
+
+  remainingDepth() {
+    const id = this.sessionId();
+    if (this.depthBySession.has(id)) return this.depthBySession.get(id);
+    return this.maxDepth;
   }
 
   resolveParent() {
@@ -33,6 +45,17 @@ class IPythonCodeRuntime {
       a?.roots?.()?.[0] ||
       null
     );
+  }
+
+  skillDir() {
+    const home = process.env.DSH_HOME || join(homedir(), ".dsh");
+    return join(home, "rlm-skills");
+  }
+
+  skillPath(name) {
+    const safe = String(name).replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 64);
+    if (!safe) throw new Error("invalid skill name");
+    return { safe, path: join(this.skillDir(), `${safe}.py`) };
   }
 
   hostHandler() {
@@ -47,44 +70,50 @@ class IPythonCodeRuntime {
               `run_code must snapshot the parent at run() entry.`,
           );
         }
-        try {
-          const ac = new AbortController();
-          const run = await this.ctx.subagents.start("spawn", {
-            label: params.name ?? "rlm",
-            prompt: [{ type: "text", text: String(params.prompt ?? "") }],
-            parent,
-            signal: ac.signal,
-            maxDepth: 2,
-          });
-          this.runs.set(String(run.id), run);
-          this.aborts.set(String(run.id), ac);
-          return {
-            rlm_child_id: run.id,
-            name: params.name ?? run.id,
-            session_dir: run.localAgent?.session?.dir ?? "",
-            model: run.localAgent?.model ?? "",
-            status: "running",
-          };
-        } catch (startErr) {
-          const tools = this.lastBindings.find((b) => b.global === "tools")?.functions;
-          const spawnFn = tools?.subagent || tools?.subagent_fork;
-          if (typeof spawnFn !== "function") throw startErr;
+        const remaining = this.remainingDepth();
+        if (remaining <= 0) throw new Error(`rlm(): max recursion depth (${this.maxDepth})`);
+        const childPrompt = String(params.prompt ?? "");
+        const tools = this.lastBindings.find((b) => b.global === "tools")?.functions;
+        const spawnFn = tools?.subagent || tools?.subagent_fork;
+        if (typeof spawnFn === "function") {
           const out = await spawnFn({
             description: params.name ?? "rlm",
-            prompt: String(params.prompt ?? ""),
+            prompt: childPrompt,
             run_in_background: false,
           });
           const id = childIdFrom(out) ?? `rlm-${Date.now()}`;
-          this.runs.set(String(id), { result: Promise.resolve({ output: out }) });
+          const folded = foldSubagentOutput(out);
+          this.runs.set(String(id), {
+            result: Promise.resolve({ output: folded ?? out, stopReason: "completed" }),
+          });
+          this.depthBySession.set(String(id), remaining - 1);
           return {
             rlm_child_id: id,
             name: params.name ?? id,
             session_dir: "",
             model: "",
             status: "done",
-            result: typeof out === "string" ? out : out?.output ?? out,
+            result: folded,
           };
         }
+        const ac = new AbortController();
+        const run = await this.ctx.subagents.start("spawn", {
+          label: params.name ?? "rlm",
+          prompt: [{ type: "text", text: childPrompt }],
+          parent,
+          signal: ac.signal,
+          maxDepth: remaining,
+        });
+        this.runs.set(String(run.id), run);
+        this.aborts.set(String(run.id), ac);
+        this.depthBySession.set(String(run.id), remaining - 1);
+        return {
+          rlm_child_id: run.id,
+          name: params.name ?? run.id,
+          session_dir: run.localAgent?.session?.dir ?? "",
+          model: run.localAgent?.model ?? "",
+          status: "running",
+        };
       }
       if (method === "rlm.wait") {
         const id = String(params.rlm_child_id);
@@ -123,16 +152,34 @@ class IPythonCodeRuntime {
         return this.ctx.get("rlm.haystack") ?? "";
       }
       if (method === "rlm.save_skill") {
-        this.skills.set(String(params.name), String(params.code ?? ""));
-        return true;
+        const { safe, path } = this.skillPath(params.name);
+        mkdirSync(this.skillDir(), { recursive: true });
+        const code = String(params.code ?? "");
+        writeFileSync(path, code, "utf8");
+        this.skills.set(safe, code);
+        return safe;
       }
       if (method === "rlm.load_skill") {
-        const code = this.skills.get(String(params.name));
-        if (code === undefined) throw new Error(`harness missing skill ${params.name}`);
-        return code;
+        const { safe, path } = this.skillPath(params.name);
+        if (this.skills.has(safe)) return this.skills.get(safe);
+        try {
+          const code = readFileSync(path, "utf8");
+          this.skills.set(safe, code);
+          return code;
+        } catch {
+          throw new Error(`harness missing skill ${safe}`);
+        }
       }
       if (method === "rlm.list_skills") {
-        return [...this.skills.keys()];
+        let disk = [];
+        try {
+          disk = readdirSync(this.skillDir())
+            .filter((f) => f.endsWith(".py"))
+            .map((f) => f.slice(0, -3));
+        } catch {
+          disk = [];
+        }
+        return [...new Set([...this.skills.keys(), ...disk])];
       }
       if (method === "tools.dispatch") {
         const fn = this.lastBindings.find((b) => b.global === "tools")?.functions?.[params.name];
@@ -283,8 +330,10 @@ function outputValueText(values) {
   return texts.join("") || null;
 }
 
-export function apply(ctx) {
-  const runtime = new IPythonCodeRuntime(ctx);
+export function apply(ctx, config = {}) {
+  const runtime = new IPythonCodeRuntime(ctx, undefined, {
+    maxDepth: config.maxDepth ?? 2,
+  });
   ctx.provide("codeRuntime", runtime);
   ctx.on("dispose", () => runtime.dispose());
 }
