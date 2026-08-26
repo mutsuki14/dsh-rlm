@@ -9,6 +9,9 @@ class IPythonCodeRuntime {
   kernels = new Map();
   skills = new Map();
   runs = new Map();
+  lastParent = null;
+  lastBindings = [];
+  lastSignal = undefined;
 
   constructor(ctx, host) {
     this.ctx = ctx;
@@ -16,24 +19,55 @@ class IPythonCodeRuntime {
   }
 
   sessionId() {
-    const id = this.ctx.get("agentSessionId");
-    return id ?? "default";
+    const parent = this.lastParent;
+    return parent?.id ?? parent?.session?.id ?? this.ctx.get("agentSessionId") ?? "default";
+  }
+
+  resolveParent() {
+    const a = this.ctx.agents;
+    return (
+      this.ctx.get("agent") ||
+      a?.currentInitiator?.() ||
+      a?.list?.()?.[0] ||
+      a?.roots?.()?.[0] ||
+      null
+    );
   }
 
   hostHandler() {
     if (this.host) return this.host;
     return async (method, params) => {
       if (method === "rlm.run") {
-        const parent =
-          this.ctx.get("agent") || this.ctx.agents.get(this.sessionId());
+        const parent = this.lastParent || this.resolveParent();
         if (!parent) {
-          throw new Error(`rlm(): no live agent for session ${this.sessionId()}`);
+          const listed = this.ctx.agents?.list?.()?.length ?? 0;
+          throw new Error(
+            `rlm(): no live agent (initiator empty, agents.list=${listed}). ` +
+              `run_code must snapshot the parent at run() entry.`,
+          );
+        }
+        const tools = this.lastBindings.find((b) => b.global === "tools")?.functions;
+        const spawnFn = tools?.subagent || tools?.subagent_fork;
+        if (typeof spawnFn === "function") {
+          const out = await spawnFn({
+            description: params.name ?? "rlm",
+            prompt: String(params.prompt ?? ""),
+            run_in_background: true,
+          });
+          const id = out?.subagentId ?? out?.id ?? out?.rlm_child_id;
+          return {
+            rlm_child_id: id,
+            name: params.name ?? id,
+            session_dir: "",
+            model: "",
+            status: "running",
+          };
         }
         const run = await this.ctx.subagents.start("spawn", {
           label: params.name ?? "rlm",
           prompt: [{ type: "text", text: String(params.prompt ?? "") }],
           parent,
-          signal: new AbortController().signal,
+          signal: this.lastSignal ?? new AbortController().signal,
           maxDepth: 2,
         });
         this.runs.set(String(run.id), run);
@@ -79,6 +113,8 @@ class IPythonCodeRuntime {
         return [...this.skills.keys()];
       }
       if (method === "tools.dispatch") {
+        const fn = this.lastBindings.find((b) => b.global === "tools")?.functions?.[params.name];
+        if (typeof fn === "function") return fn(params.args);
         return this.ctx.tools.execute({
           global: params.global,
           name: params.name,
@@ -90,6 +126,9 @@ class IPythonCodeRuntime {
   }
 
   async run(request) {
+    this.lastParent = this.resolveParent();
+    this.lastBindings = request.bindings ?? [];
+    this.lastSignal = request.signal;
     const id = this.sessionId();
     let km = this.kernels.get(id);
     if (!km) {
