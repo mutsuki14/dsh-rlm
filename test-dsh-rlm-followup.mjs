@@ -123,7 +123,8 @@ print("double", double(21))
 save_skill("empty-desc", "N = 1\\n", "")
 print("empty", list_skills())
 save_skill("scan-token", "TOKEN = 'SEAM'\\n", "hyphenated package")
-load_skill("scan-token")
+info = load_skill("scan-token")
+print("skillmeta", info["name"])
 print("token", TOKEN)
 `,
   bindings: [],
@@ -133,6 +134,9 @@ console.log("--- skill logs ---");
 console.log(logs2);
 if (r2.error) fail(r2.error.message);
 if (!logs2.includes("double 42")) fail(`skill exec ${logs2}`);
+if (!logs2.includes("skillmeta scan-token") && !logs2.includes("skillmeta scan_token")) {
+  fail(`load_skill should return dict with name, logs=${logs2}`);
+}
 if (!logs2.includes("token SEAM")) fail(`hyphen skill ${logs2}`);
 const skillMd = readFileSync(join(home, "skills", "double", "SKILL.md"), "utf8");
 if (!skillMd.includes("name: double")) fail(`SKILL.md ${skillMd}`);

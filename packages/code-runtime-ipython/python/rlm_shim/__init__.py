@@ -10,7 +10,7 @@ from typing import Any
 
 from .host import host_request, host_request_sync
 
-RLM_VERSION = "0.4.13"
+RLM_VERSION = "0.4.14"
 _SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
 
 
@@ -238,7 +238,16 @@ def install(ns: dict[str, Any] | None = None) -> None:
                 loaded = False
         if not loaded and code:
             exec(compile(code, f"<skill:{name}>", "exec"), target)
-        return code
+        kebab = name.replace("_", "-")
+        if isinstance(payload, dict) and payload.get("name"):
+            kebab = str(payload.get("name"))
+        return {
+            "name": kebab,
+            "code": code,
+            "root": root,
+            "module": module,
+            "init": init,
+        }
 
     def set_haystack(text: str) -> None:
         value = str(text)

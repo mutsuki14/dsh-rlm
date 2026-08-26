@@ -172,10 +172,11 @@ const kmSkill = new KernelManager("skill", async (method, params) => {
 });
 await kmSkill.start();
 const saved = await kmSkill.execute(
-  "save_skill('double', 'def double(x):\\n    return x * 2\\n')\nload_skill('double')\ndouble(21)",
+  "save_skill('double', 'def double(x):\\n    return x * 2\\n')\ninfo = load_skill('double')\nprint('skillname', info['name'])\ndouble(21)",
 );
 if (saved.error) fail(`skill: ${saved.error.message}`);
 if (saved.value !== 42) fail(`skill double ${JSON.stringify(saved)}`);
+if (!(saved.logs || []).join("\n").includes("skillname double")) fail(`load_skill dict ${JSON.stringify(saved.logs)}`);
 await kmSkill.shutdown();
 
 const km5 = new KernelManager("inspect", async (method) => {

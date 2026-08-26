@@ -4,7 +4,7 @@ English | [中文](README.zh-CN.md)
 
 Persistent **Recursive Language Model** runtime for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
-Current release line: **v0.4.13** (`wait()` keeps `status=error` when a child is killed).
+Current release line: **v0.4.14** (`load_skill` returns `{name, code, root, module}`).
 
 It replaces the per-turn worker-thread `codeRuntime` with a **long-lived Python kernel**, exposes non-blocking `await rlm()` (parallel fan-out + `wait()`), follows up the **same child** with `handle.message()`, injects `context` from haystack, and stores skills as kebab-case packages (`SKILL.md` + `__init__.py`).
 
