@@ -30,10 +30,10 @@ Declare every `@deepseek-ai/*` host package as a **peerDependency**.
 
 `KernelManager` talks JSONL to `python/repl_worker.py`. Same process, same `NS`, across `execute()` calls. Nested `await rlm()` is a `host` frame on the same pipes so it cannot deadlock the cell.
 
-ZeroMQ / ipykernel remains an optional later transport. The programming model does not depend on it.
+Entries ship as **JavaScript**. Node will not strip TypeScript under `node_modules`.
 
 ```sh
-node --experimental-strip-types test-repl.mjs
+node test-repl.mjs
 ```
 
 ## Install

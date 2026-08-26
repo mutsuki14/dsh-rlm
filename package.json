@@ -1,6 +1,6 @@
 {
   "name": "@seamlabs/dsh-rlm",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Persistent RLM kernel for DeepSeek Harness: codeRuntime + rlm() + snapshot",
   "type": "module",
   "license": "MIT",
@@ -14,10 +14,10 @@
     }
   },
   "exports": {
-    "./runtime": "./packages/code-runtime-ipython/src/index.ts",
-    "./bindings": "./packages/rlm-bindings/src/index.ts",
-    "./persona": "./packages/rlm-persona/src/index.ts",
-    "./snapshot": "./packages/rlm-snapshot/src/index.ts"
+    "./runtime": "./packages/code-runtime-ipython/src/index.js",
+    "./bindings": "./packages/rlm-bindings/src/index.js",
+    "./persona": "./packages/rlm-persona/src/index.js",
+    "./snapshot": "./packages/rlm-snapshot/src/index.js"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
