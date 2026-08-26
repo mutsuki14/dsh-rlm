@@ -1,0 +1,254 @@
+"""Model-facing RLM shim. No agent loop, no provider calls."""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, fields
+from typing import Any
+
+from .host import host_request, host_request_sync
+
+
+def _from_payload(cls: type, payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        raise TypeError(f"host returned {type(payload).__name__}, expected dict")
+    allowed = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in payload.items() if k in allowed})
+
+
+@dataclass
+class RLMSpawnHandle:
+    rlm_child_id: str
+    name: str
+    session_dir: str = ""
+    model: str = ""
+    status: str = "running"
+    result: Any = None
+
+    async def wait(self) -> Any:
+        payload = await host_request("rlm.wait", {"rlm_child_id": self.rlm_child_id})
+        if isinstance(payload, dict):
+            self.status = str(payload.get("status") or "done")
+            self.result = payload.get("result")
+        else:
+            self.status = "done"
+            self.result = payload
+        return self.result
+
+
+def _ns(ns: dict[str, Any] | None) -> dict[str, Any]:
+    if ns is not None:
+        return ns
+    ip = get_ipython()  # type: ignore[name-defined]
+    return ip.user_ns
+
+
+async def run(prompt: str, name: str | None = None, **kw: Any) -> RLMSpawnHandle:
+    payload = await host_request("rlm.run", {"prompt": prompt, "name": name, **kw})
+    return _from_payload(RLMSpawnHandle, payload)
+
+
+async def list_subagents() -> list[RLMSpawnHandle]:
+    rows = await host_request("rlm.list_subagents", {})
+    return [_from_payload(RLMSpawnHandle, row) for row in (rows or [])]
+
+
+async def delete_subagent(handle: RLMSpawnHandle | str) -> None:
+    cid = handle if isinstance(handle, str) else handle.rlm_child_id
+    await host_request("rlm.delete_subagent", {"rlm_child_id": cid})
+
+
+class _Rlm:
+    run = staticmethod(run)
+    list_subagents = staticmethod(list_subagents)
+    delete_subagent = staticmethod(delete_subagent)
+    host_request = staticmethod(host_request)
+
+    async def __call__(self, prompt: str, name: str | None = None, **kw: Any):
+        return await run(prompt, name=name, **kw)
+
+
+rlm = _Rlm()
+
+
+class Path:
+    """pathlib-shaped facade. Bytes never leave the host tools pipeline."""
+
+    def __init__(self, path: str):
+        self.path = str(path)
+
+    def read_text(self, encoding: str = "utf-8") -> str:
+        return host_request_sync(
+            "tools.dispatch",
+            {"global": "tools", "name": "read", "args": {"path": self.path, "encoding": encoding}},
+        )
+
+    def write_text(self, data: str, encoding: str = "utf-8") -> int:
+        return host_request_sync(
+            "tools.dispatch",
+            {
+                "global": "tools",
+                "name": "write",
+                "args": {"path": self.path, "content": data, "encoding": encoding},
+            },
+        )
+
+    def exists(self) -> bool:
+        try:
+            self.read_text()
+            return True
+        except Exception:
+            return False
+
+    def __repr__(self) -> str:
+        return f"Path({self.path!r})"
+
+
+def load_haystack() -> str:
+    return host_request_sync("rlm.load_haystack", {}) or ""
+
+
+def save_skill(name: str, code: str) -> None:
+    host_request_sync("rlm.save_skill", {"name": name, "code": code})
+
+
+def chunk(s: Any, n: int) -> list[str]:
+    text = str(s)
+    size = int(n) or 1
+    return [text[i : i + size] for i in range(0, len(text), size)] or [""]
+
+
+def install(ns: dict[str, Any] | None = None) -> None:
+    target = _ns(ns)
+
+    def load_skill(name: str) -> str:
+        code = host_request_sync("rlm.load_skill", {"name": name}) or ""
+        if not code:
+            raise RuntimeError(f"harness 里没有 {name}")
+        exec(compile(code, f"<skill:{name}>", "exec"), target)
+        return code
+
+    def list_skills() -> list[str]:
+        rows = host_request_sync("rlm.list_skills", {}) or []
+        return list(rows)
+
+    target["rlm"] = rlm
+    target["RLMSpawnHandle"] = RLMSpawnHandle
+    target["Path"] = Path
+    target["load_haystack"] = load_haystack
+    target["save_skill"] = save_skill
+    target["load_skill"] = load_skill
+    target["list_skills"] = list_skills
+    target["chunk"] = chunk
+    target.setdefault("tools", _ToolsProxy("tools", ["bash", "read", "write"]))
+
+
+def bind(spec_json: Any, ns: dict[str, Any] | None = None) -> None:
+    spec = json.loads(spec_json) if isinstance(spec_json, str) else spec_json
+    target = _ns(ns)
+    for item in spec:
+        proxy = _ToolsProxy(item["global"], item["names"])
+        target[item["global"]] = proxy
+
+
+def snapshot(ns: dict[str, Any] | None = None) -> dict[str, str]:
+    target = _ns(ns)
+    skip = _SKIP
+    out: dict[str, str] = {}
+    for k, v in target.items():
+        if k.startswith("_") or k in skip:
+            continue
+        out[k] = f"{type(v).__name__}:{_brief(v)}"
+    return out
+
+
+_SKIP = {
+    "In",
+    "Out",
+    "exit",
+    "quit",
+    "get_ipython",
+    "__name__",
+    "__builtins__",
+    "rlm",
+    "RLMSpawnHandle",
+    "Path",
+    "load_haystack",
+    "save_skill",
+    "load_skill",
+    "list_skills",
+    "chunk",
+    "tools",
+}
+
+
+def inspect(ns: dict[str, Any] | None = None) -> dict[str, Any]:
+    target = _ns(ns)
+    out: dict[str, Any] = {}
+    for k, v in target.items():
+        if k.startswith("_") or k in _SKIP:
+            continue
+        if isinstance(v, Path):
+            out[k] = {"__type": "path", "path": v.path}
+            continue
+        if isinstance(v, RLMSpawnHandle):
+            out[k] = {
+                "__type": "rlm_handle",
+                "id": v.rlm_child_id,
+                "name": v.name,
+                "status": v.status,
+                "result": v.result,
+            }
+            continue
+        if callable(v) and not isinstance(v, type):
+            continue
+        try:
+            json.dumps(v)
+            out[k] = v
+        except TypeError:
+            out[k] = {"__type": "opaque", "pytype": type(v).__name__, "repr": _brief(v)}
+    return out
+
+
+def inject(values: dict[str, Any], ns: dict[str, Any] | None = None) -> None:
+    target = _ns(ns)
+    for k, v in (values or {}).items():
+        if k in _SKIP or k.startswith("_"):
+            continue
+        if isinstance(v, dict) and v.get("__type") == "path":
+            target[k] = Path(str(v.get("path") or ""))
+        elif isinstance(v, dict) and v.get("__type") == "rlm_handle":
+            target[k] = RLMSpawnHandle(
+                rlm_child_id=str(v.get("id") or v.get("rlm_child_id") or k),
+                name=str(v.get("name") or k),
+                status=str(v.get("status") or "done"),
+                result=v.get("result"),
+            )
+        elif isinstance(v, dict) and v.get("__type") == "opaque":
+            continue
+        else:
+            target[k] = v
+
+
+def _brief(v: Any, n: int = 80) -> str:
+    s = repr(v)
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+class _ToolsProxy:
+    def __init__(self, global_name: str, names: list[str]):
+        self._global = global_name
+        for name in names:
+            setattr(self, name, _BoundTool(global_name, name))
+
+
+class _BoundTool:
+    def __init__(self, global_name: str, name: str):
+        self._global = global_name
+        self._name = name
+
+    async def __call__(self, args: Any = None, **kw: Any):
+        payload = args if args is not None else kw
+        return await host_request(
+            "tools.dispatch",
+            {"global": self._global, "name": self._name, "args": payload},
+        )
