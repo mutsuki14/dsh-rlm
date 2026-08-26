@@ -1,13 +1,14 @@
 import { KernelManager } from "./kernel-manager.js";
 
 export const name = "@seamlabs/dsh-rlm/runtime";
-export const inject = ["sessions"];
+export const inject = ["sessions", "subagents", "tools", "agents"];
 
 class IPythonCodeRuntime {
   language = "python";
   isolation = "process";
   kernels = new Map();
   skills = new Map();
+  runs = new Map();
 
   constructor(ctx, host) {
     this.ctx = ctx;
@@ -23,33 +24,43 @@ class IPythonCodeRuntime {
     if (this.host) return this.host;
     return async (method, params) => {
       if (method === "rlm.run") {
-        const child = await this.ctx.subagents.getProvider("spawn-in-process").start({
-          prompt: params.prompt,
-          name: params.name,
-          maxDepth: this.ctx.config?.rlm?.maxDepth ?? 2,
+        const parent =
+          this.ctx.get("agent") || this.ctx.agents.get(this.sessionId());
+        if (!parent) {
+          throw new Error(`rlm(): no live agent for session ${this.sessionId()}`);
+        }
+        const run = await this.ctx.subagents.start("spawn", {
+          label: params.name ?? "rlm",
+          prompt: [{ type: "text", text: String(params.prompt ?? "") }],
+          parent,
+          signal: new AbortController().signal,
+          maxDepth: 2,
         });
+        this.runs.set(String(run.id), run);
         return {
-          rlm_child_id: child.id,
-          name: params.name ?? child.id,
-          session_dir: child.sessionDir,
-          model: child.model,
+          rlm_child_id: run.id,
+          name: params.name ?? run.id,
+          session_dir: run.localAgent?.session?.dir ?? "",
+          model: run.localAgent?.model ?? "",
           status: "running",
         };
       }
       if (method === "rlm.wait") {
-        const id = this.ctx.get("agentSessionId");
-        const rows = await this.ctx.subagents.list(id);
-        const row = Array.isArray(rows) ? rows.find((x) => x.id === params.rlm_child_id) : undefined;
-        return {
-          result: row?.result ?? row?.output ?? null,
-          status: row?.status ?? "done",
-        };
+        const run = this.runs.get(String(params.rlm_child_id));
+        if (!run?.result) {
+          throw new Error(`rlm.wait: unknown handle ${params.rlm_child_id}`);
+        }
+        const settled = await run.result;
+        return { result: foldSubagentOutput(settled), status: "done" };
       }
       if (method === "rlm.list_subagents") {
-        return this.ctx.subagents.list(this.ctx.get("agentSessionId"));
+        const rows = await this.ctx.subagents.listChildren(this.sessionId());
+        return Array.isArray(rows) ? rows : [];
       }
       if (method === "rlm.delete_subagent") {
-        await this.ctx.subagents.drain(params.rlm_child_id);
+        const run = this.runs.get(String(params.rlm_child_id));
+        if (run?.dispose) await run.dispose();
+        this.runs.delete(String(params.rlm_child_id));
         return null;
       }
       if (method === "rlm.load_haystack") {
@@ -111,6 +122,25 @@ class IPythonCodeRuntime {
     await Promise.all([...this.kernels.values()].map((k) => k.shutdown()));
     this.kernels.clear();
   }
+}
+
+function foldSubagentOutput(settled) {
+  if (!settled || typeof settled !== "object") return settled ?? null;
+  if (settled.structured != null) return settled.structured;
+  const output = settled.output;
+  if (typeof output === "string") return output;
+  if (!Array.isArray(output)) return output ?? null;
+  const texts = [];
+  for (const msg of output) {
+    const content = msg?.content ?? msg;
+    if (typeof content === "string") texts.push(content);
+    else if (Array.isArray(content)) {
+      for (const b of content) {
+        if (b && typeof b.text === "string") texts.push(b.text);
+      }
+    }
+  }
+  return texts.join("\n") || null;
 }
 
 export function apply(ctx) {
