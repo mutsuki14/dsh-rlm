@@ -54,7 +54,11 @@ class IPythonCodeRuntime {
             prompt: String(params.prompt ?? ""),
             run_in_background: true,
           });
-          const id = out?.subagentId ?? out?.id ?? out?.rlm_child_id;
+          const id = childIdFrom(out);
+          if (!id) {
+            throw new Error(`rlm(): subagent spawn returned no id: ${JSON.stringify(out)}`);
+          }
+          this.runs.set(String(id), { kind: "continuable", id });
           return {
             rlm_child_id: id,
             name: params.name ?? id,
@@ -80,12 +84,14 @@ class IPythonCodeRuntime {
         };
       }
       if (method === "rlm.wait") {
-        const run = this.runs.get(String(params.rlm_child_id));
-        if (!run?.result) {
-          throw new Error(`rlm.wait: unknown handle ${params.rlm_child_id}`);
+        const id = String(params.rlm_child_id);
+        const run = this.runs.get(id);
+        if (run?.result) {
+          const settled = await run.result;
+          return { result: foldSubagentOutput(settled), status: "done" };
         }
-        const settled = await run.result;
-        return { result: foldSubagentOutput(settled), status: "done" };
+        const result = await this.waitContinuable(id);
+        return { result, status: "done" };
       }
       if (method === "rlm.list_subagents") {
         const rows = await this.ctx.subagents.listChildren(this.sessionId());
@@ -125,6 +131,51 @@ class IPythonCodeRuntime {
     };
   }
 
+  async waitContinuable(id) {
+    const deadline = Date.now() + 180000;
+    let last = null;
+    while (Date.now() < deadline) {
+      last = this.readChildOutput(id);
+      let activity;
+      try {
+        const rows = await this.ctx.subagents.listChildren(this.sessionId());
+        const row = Array.isArray(rows)
+          ? rows.find((r) => String(r.id ?? r.childId) === id)
+          : undefined;
+        activity = row?.activity;
+      } catch {
+        activity = undefined;
+      }
+      if (last != null && last !== "" && activity !== "running") return last;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    if (last != null && last !== "") return last;
+    throw new Error(`rlm.wait: timed out waiting for ${id}`);
+  }
+
+  readChildOutput(id) {
+    const session = this.ctx.sessions?.get?.(id);
+    if (!session) return null;
+    let messages = [];
+    try {
+      messages = session.deriveMessages?.() ?? session.messages ?? [];
+    } catch {
+      messages = [];
+    }
+    if (!Array.isArray(messages)) return null;
+    const assistants = messages.filter(
+      (m) => m?.role === "assistant" || m?.kind === "assistant" || m?.type === "assistant",
+    );
+    const last = assistants.at(-1);
+    if (!last) return null;
+    const content = last.content ?? last.text ?? last.message;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content.map((b) => (typeof b === "string" ? b : b?.text ?? "")).join("");
+    }
+    return content ?? null;
+  }
+
   async run(request) {
     this.lastParent = this.resolveParent();
     this.lastBindings = request.bindings ?? [];
@@ -161,6 +212,17 @@ class IPythonCodeRuntime {
     await Promise.all([...this.kernels.values()].map((k) => k.shutdown()));
     this.kernels.clear();
   }
+}
+
+function childIdFrom(out) {
+  if (out == null) return undefined;
+  if (typeof out === "string") {
+    const m = out.match(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+    );
+    return m?.[0] ?? out;
+  }
+  return out.subagentId ?? out.childId ?? out.id ?? out.rlm_child_id;
 }
 
 function foldSubagentOutput(settled) {
