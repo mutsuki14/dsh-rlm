@@ -10,7 +10,7 @@ from typing import Any
 
 from .host import host_request, host_request_sync
 
-RLM_VERSION = "0.4.14"
+RLM_VERSION = "0.4.15"
 _SURROGATES = {i: "\ufffd" for i in range(0xD800, 0xE000)}
 
 
@@ -55,9 +55,12 @@ class RLMSpawnHandle:
             return payload
         return sanitize(payload)
 
-    async def wait(self, timeout: float | None = None) -> Any:
+    async def wait(self, timeout: float | None = None, timeout_ms: float | None = None, **kw: Any) -> Any:
         params: dict[str, Any] = {"rlm_child_id": self.rlm_child_id}
-        if timeout is not None:
+        raw_ms = timeout_ms if timeout_ms is not None else kw.get("timeoutMs")
+        if raw_ms is not None:
+            params["timeout_ms"] = int(raw_ms)
+        elif timeout is not None:
             ms = float(timeout)
             if ms <= 10_000:
                 ms *= 1000

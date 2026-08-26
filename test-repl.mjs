@@ -52,6 +52,27 @@ await km2.start();
 const r = await km2.execute('h = await rlm("extract token", name="scan-0")\nh.name');
 if (r.error) fail(`rlm cell: ${r.error.message}`);
 if (r.value !== "scan-0") fail(`rlm handle name ${JSON.stringify(r.value)} ${JSON.stringify(r)}`);
+const waits = [];
+const kmWaitKw = new KernelManager("waitkw", async (method, params) => {
+  if (method === "rlm.run") {
+    return { rlm_child_id: "child-w", name: params.name ?? "w", session_dir: "", model: "t" };
+  }
+  if (method === "rlm.wait") {
+    waits.push(params);
+    return { result: "OK", status: "done" };
+  }
+  throw new Error(`unexpected host ${method}`);
+});
+await kmWaitKw.start();
+const wk = await kmWaitKw.execute(
+  'h = await rlm("x", name="w")\nprint(await h.wait(timeout_ms=90000))\nprint(await h.wait(timeout=5))\nprint(await h.wait(timeout_ms=8000))',
+);
+if (wk.error) fail(`wait kwargs: ${wk.error.message}`);
+if (waits.length < 3) fail(`wait calls ${JSON.stringify(waits)}`);
+if (Number(waits[0].timeout_ms) !== 90000) fail(`timeout_ms not forwarded ${JSON.stringify(waits[0])}`);
+if (Number(waits[1].timeout_ms) !== 5000) fail(`timeout seconds not scaled ${JSON.stringify(waits[1])}`);
+if (Number(waits[2].timeout_ms) !== 8000) fail(`timeout_ms 8000 must stay ms ${JSON.stringify(waits[2])}`);
+await kmWaitKw.shutdown();
 await km2.shutdown();
 
 const km3 = new KernelManager("bash", async (method, params) => {

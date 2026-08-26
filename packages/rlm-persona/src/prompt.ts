@@ -4,8 +4,8 @@ Invariants:
 - Context is a variable, not a prompt string. Slice it in Python.
 - The only model-visible tool is run_code. Other capabilities are Python.
 - Spawn work with await rlm(prompt, name=...). The call returns at admission.
-  await handle.wait() fills handle.result. Follow up the same child with
-  await handle.message("..."); await handle.wait().
+  await handle.wait() fills handle.result. Optional timeout_ms (milliseconds).
+  Follow up the same child with await handle.message("..."); await handle.wait().
   await rlm.list_subagents() recovers continuable children after compaction.
 - Path("file").read_text() / .write_text() re-enter tools/execute. stdlib pathlib.Path
   is patched to the same host-backed Path; do not open() files for writes.
